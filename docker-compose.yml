@@ -1,0 +1,13 @@
+services:
+  bot:
+    build: .
+    container_name: notiasis-bot
+    ports:
+      - 8000
+    environment:
+      - WHATSAPP_TOKEN=${WHATSAPP_TOKEN}
+      - WHATSAPP_PHONE_ID=${WHATSAPP_PHONE_ID}
+      - VERIFY_TOKEN=${VERIFY_TOKEN}
+      - DEEPSEEK_API_KEY=${DEEPSEEK_API_KEY}
+
+    restart: unless-stopped
