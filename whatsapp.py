@@ -34,7 +34,7 @@ def download_media(media_url: str) -> bytes:
 
 def send_whatsapp_message(to_number: str, media_id: str, name: str):
     """
-    Sends a WhatsApp message with the document and caption.
+    Sends a WhatsApp template message with a document header and body variables.
     """
     url = f"{GRAPH_API_URL}/{WHATSAPP_PHONE_ID}/messages"
     headers = {
@@ -42,17 +42,50 @@ def send_whatsapp_message(to_number: str, media_id: str, name: str):
         "Content-Type": "application/json"
     }
     
-    caption = f"Hola {name} \nTu pedido ya fue enviado, estate atenta/o para su llegada. ¡Qué lo disfrutes!"
+    template_name = "pedido_eviado"
+    to_number = "+573003579384" # Debugging number, replace with the actual recipient number in production
     
     data = {
         "messaging_product": "whatsapp",
         "recipient_type": "individual",
         "to": to_number,
-        "type": "document",
-        "document": {
-            "id": media_id,
-            "caption": caption,
-            "filename": "Guia_de_envio.pdf"
+        "type": "template",
+        "template": {
+            "name": template_name,
+            "language": {
+                "code": "es_CO"
+            },
+            "components": [
+                {
+                    "type": "header",
+                    "parameters": [
+                        {
+                            "type": "document",
+                            "document": {
+                                "id": media_id,
+                                "filename": "Guia_de_envio.pdf"
+                            }
+                        }
+                    ]
+                },
+                {
+                    "type": "body",
+                    "parameters": [
+                        {
+                            "type": "text",
+                            "text": name
+                        },
+                        {
+                            "type": "text",
+                            "text": "#240022019645"  # Replace with the actual order number
+                        },
+                        {
+                            "type": "text",
+                            "text": "Oficina Interrapidisimo Cra. 4 #59A-107 Manzana 8, Casa 5, Sector A, Pereira, Risaralda"
+                        }
+                    ]
+                }
+            ]
         }
     }
     
