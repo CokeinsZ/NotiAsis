@@ -50,11 +50,13 @@ def process_webhook_event(data: dict):
                                 
                             name = recipient_info.get("name", "")
                             phone = recipient_info.get("phone", "")
+                            tracking_number = recipient_info.get("tracking_number", "")
+                            delivery_address = recipient_info.get("delivery_address", "")
                             
                             if name and phone:
-                                print(f"Extracted info - Name: {name}, Phone: {phone}")
+                                print(f"Extracted info - Name: {name}, Phone: {phone}, Guía: {tracking_number}, Dirección: {delivery_address}")
                                 # 5. Send WhatsApp message to recipient
-                                send_whatsapp_message(phone, media_id, name)
+                                send_whatsapp_message(phone, media_id, name, tracking_number, delivery_address)
                             else:
                                 print("Could not extract both name and phone from the PDF.")
     except Exception as e:

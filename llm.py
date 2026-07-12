@@ -14,16 +14,22 @@ def extract_recipient_info(text: str) -> dict:
     """
 
     system_prompt = """
-        You are an assistant that extracts the recipient's information from shipping labels (guías de envío).
+        You are an assistant that extracts the recipient's information and shipping details from shipping labels (guías de envío).
         The text provided contains both sender (quien envía) and recipient (quien recibe) information.
-        Your task is to extract ONLY the RECIPIENT'S (destinatario/quien recibe el pedido) name and mobile number.
-        Format the mobile number so it starts with the country code '57' followed by the 10-digit number (e.g., 573001234567).
-        If you cannot find the recipient information, return empty strings.
+        Your task is to extract the following:
+        1. RECIPIENT'S name (destinatario/quien recibe el pedido).
+        2. RECIPIENT'S mobile number. Format it so it starts with the country code '+57' followed by the 10-digit number (e.g., +573001234567).
+        3. Tracking Number (Número de Guía).
+        4. Delivery Address (Lugar al que llega el pedido / Dirección del destinatario o sucursal).
+
+        If you cannot find a specific piece of information, return an empty string for that field.
 
         Output strictly in valid JSON format:
         {
-        "name": "extracted name",
-        "phone": "57xxxxxxxxxx"
+          "name": "extracted name",
+          "phone": "+57xxxxxxxxxx",
+          "tracking_number": "extracted tracking number",
+          "delivery_address": "extracted delivery address"
         }
         """
     

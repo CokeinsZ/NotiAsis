@@ -32,7 +32,7 @@ def download_media(media_url: str) -> bytes:
         print(f"Error downloading media: {response.text}")
         return None
 
-def send_whatsapp_message(to_number: str, media_id: str, name: str):
+def send_whatsapp_message(to_number: str, media_id: str, name: str, tracking_number: str, delivery_address: str):
     """
     Sends a WhatsApp template message with a document header and body variables.
     """
@@ -77,11 +77,11 @@ def send_whatsapp_message(to_number: str, media_id: str, name: str):
                         },
                         {
                             "type": "text",
-                            "text": "#240022019645"  # Replace with the actual order number
+                            "text": tracking_number
                         },
                         {
                             "type": "text",
-                            "text": "Oficina Interrapidisimo Cra. 4 #59A-107 Manzana 8, Casa 5, Sector A, Pereira, Risaralda"
+                            "text": delivery_address
                         }
                     ]
                 }
