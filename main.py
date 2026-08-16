@@ -19,12 +19,17 @@ def process_webhook_event(data: dict):
                 messages = value.get("messages", [])
                 
                 for message in messages:
+                    permitidos = ["573003579384", "+573003579384", "573205363052", "+573205363052"]
+                    if message.get("from") not in permitidos:
+                        continue
+
                     # We are only interested in document messages
                     if message.get("type") == "document":
                         document = message.get("document", {})
                         mime_type = document.get("mime_type", "")
                         
                         if "pdf" in mime_type:
+                            caption = document.get("caption")
                             media_id = document.get("id")
                             
                             print(f"Received PDF with media_id: {media_id}")
