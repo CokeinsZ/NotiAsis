@@ -7,6 +7,8 @@ from llm import extract_recipient_info
 app = FastAPI()
 
 def process_webhook_event(data: dict):
+    print(data)  #Debug
+
     try:
         # Navigate through the WhatsApp webhook payload
         entries = data.get("entry", [])
