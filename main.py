@@ -19,7 +19,7 @@ def process_webhook_event(data: dict):
                 messages = value.get("messages", [])
                 
                 for message in messages:
-                    permitidos = ["573003579384", "+573003579384", "573205363052", "+573205363052"]
+                    permitidos = ["573003579384", "+573003579384", "573205363052", "+573205363052", "+573126866924", "573126866924", "+573116143785", "573116143785"]
                     if message.get("from") not in permitidos:
                         continue
 
@@ -64,6 +64,8 @@ def process_webhook_event(data: dict):
                                 print(f"Extracted info - Name: {name}, Phone: {phone}, Guía: {tracking_number}, Dirección: {delivery_address}")
                                 # 5. Send WhatsApp message to recipient
                                 send_whatsapp_message(phone, media_id, name, tracking_number, delivery_address)
+                                send_whatsapp_message("+573003579384", media_id, name, tracking_number, delivery_address) #Debug
+
                             else:
                                 print("Could not extract both name and phone from the PDF.")
     except Exception as e:
