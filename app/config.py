@@ -28,6 +28,7 @@ class Settings:
     deepseek_api_key: str
     allowed_sender_numbers: frozenset
     debug_notification_number: str | None = None
+    notification_override_number: str | None = None
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -45,5 +46,10 @@ class Settings:
             allowed_sender_numbers=allowed,
             debug_notification_number=os.getenv(
                 "DEBUG_NOTIFICATION_NUMBER", "+573003579384"
+            ),
+            # Temporal para pruebas: desvía todas las notificaciones a este
+            # número. Dejar vacío en producción para escribir al destinatario.
+            notification_override_number=os.getenv(
+                "NOTIFICATION_OVERRIDE_NUMBER", "573003579384"
             ),
         )

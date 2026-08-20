@@ -36,6 +36,7 @@ def get_webhook_processor() -> WhatsAppWebhookProcessor:
             api_key=settings.deepseek_api_key
         ),
         debug_notification_number=settings.debug_notification_number,
+        notification_override_number=settings.notification_override_number,
     )
     return WhatsAppWebhookProcessor(
         notifier=notifier,

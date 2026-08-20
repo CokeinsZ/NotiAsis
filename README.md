@@ -4,6 +4,11 @@ Bot de WhatsApp que recibe guías de envío en PDF, extrae los datos del
 destinatario con DeepSeek y notifica al cliente mediante plantillas de la
 WhatsApp Cloud API.
 
+Por cada guía recibida se envían dos plantillas, en orden:
+
+1. `guia` — el PDF de la guía como documento.
+2. `mensaje_guia_es` — nombre, número de guía, producto y dirección.
+
 ## Ejecutar
 
 ```bash
@@ -30,7 +35,8 @@ app/
 │   ├── client.py            # WhatsAppClient: HTTP contra la Graph API de Meta
 │   └── templates/           # Una clase por plantilla de WhatsApp
 │       ├── base.py          #   TemplateMessage (contrato base)
-│       └── pedido_enviado.py
+│       ├── guia.py          #   GuiaTemplate (solo el PDF)
+│       └── mensaje_guia.py  #   MensajeGuiaTemplate (solo la información)
 ├── services/
 │   ├── pdf_extractor.py     # Extracción de texto de PDFs
 │   ├── recipient_extractor.py  # Extracción de datos con DeepSeek
@@ -80,8 +86,13 @@ whatsapp_client.send_template("+573001234567", MiPlantillaTemplate("hola"))
 No es necesario modificar `WhatsAppClient` ni el resto del código
 (principio abierto/cerrado).
 
+Si la plantilla debe enviarse en el flujo de notificación de guías,
+agrégala a `DEFAULT_TEMPLATE_FACTORIES` en
+`app/services/shipping_notifier.py`.
+
 ## Configuración
 
-Ver `.env.example`. Los números autorizados (`ALLOWED_SENDER_NUMBERS`) y el
-número de copia de depuración (`DEBUG_NOTIFICATION_NUMBER`) son configurables
-por variables de entorno.
+Ver `.env.example`. Los números autorizados (`ALLOWED_SENDER_NUMBERS`), el
+número de copia de depuración (`DEBUG_NOTIFICATION_NUMBER`) y el desvío de
+notificaciones para pruebas (`NOTIFICATION_OVERRIDE_NUMBER`) son
+configurables por variables de entorno.
