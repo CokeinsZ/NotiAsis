@@ -137,8 +137,34 @@ cargo test             # 42 tests, no requieren base de datos
 O todo junto con Docker (la DB puede ser externa, ej. Neon):
 
 ```bash
-docker compose up --build   # bot (:8000) + backend (:3000)
+docker compose up --build   # bot (:8000) + backend (:3000) + frontend (:3001)
 ```
+
+## Frontend web (Next.js + React + Tailwind)
+
+En `webapp/frontend/`. Interfaz de conversaciones sobre fondo negro con
+acentos azul claro de luna:
+
+- **`/`** — selector de empresa (mientras no hay autenticación).
+- **`/chats/{businessId}`** — bandeja de conversaciones:
+  - Panel izquierdo: chats ordenados por el último mensaje del usuario
+    (más reciente arriba), cada uno con nombre, **tiempo de gracia
+    restante** de la ventana de 24h y el último mensaje del usuario.
+    El chat seleccionado se ilumina con un gradiente blanco de luna.
+  - Panel derecho: historial del chat con burbujas, estados
+    (✓ / ✓✓ / ✓✓ azul) y envío de mensajes libres (deshabilitado cuando
+    la ventana de 24h está cerrada; el backend responde 422).
+
+```bash
+cd webapp/frontend
+npm ci
+npm run dev            # http://localhost:3000 (o el puerto libre)
+```
+
+La URL del backend se configura con `BACKEND_URL` (por defecto
+`http://localhost:3000`). El navegador nunca habla directo con el
+backend: pasa por el proxy `/api/backend/*` (route handler en runtime),
+así no hay CORS ni se expone la URL interna.
 
 ### Estructura
 

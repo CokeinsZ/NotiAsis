@@ -27,3 +27,15 @@ services:
       - WHATSAPP_PHONE_ID=${WHATSAPP_PHONE_ID}
       - PORT=3000
     restart: unless-stopped
+
+  frontend:
+    build: ./webapp/frontend
+    container_name: notiasis-frontend
+    ports:
+      - "3001:3000"
+    environment:
+      # URL interna del backend (la usa el servidor de Next, no el navegador)
+      - BACKEND_URL=http://backend:3000
+    depends_on:
+      - backend
+    restart: unless-stopped
