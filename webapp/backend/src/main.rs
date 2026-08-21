@@ -95,7 +95,7 @@ async fn main() {
 
     let app = build_app(pool, meta_client);
 
-    let port = std::env::var("PORT").unwrap_or_else(|_| "3000".into());
+    let port = std::env::var("PORT").unwrap_or_else(|_| "3001".into());
     let listener = tokio::net::TcpListener::bind(format!("0.0.0.0:{port}"))
         .await
         .unwrap()
