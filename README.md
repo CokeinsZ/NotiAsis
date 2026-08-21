@@ -28,7 +28,8 @@ app/
 ├── main.py                  # Punto de entrada: crea la app FastAPI
 ├── config.py                # Settings: configuración centralizada (variables de entorno)
 ├── core/
-│   └── interfaces.py        # Puertos/abstracciones del dominio (ABC)
+│   ├── interfaces.py        # Puertos/abstracciones del dominio (ABC)
+│   └── phones.py            # Normalización de teléfonos (sin '+')
 ├── models/
 │   └── shipping.py          # Modelos de dominio (RecipientInfo)
 ├── whatsapp/
@@ -41,11 +42,33 @@ app/
 │   ├── pdf_extractor.py     # Extracción de texto de PDFs
 │   ├── recipient_extractor.py  # Extracción de datos con DeepSeek
 │   ├── shipping_notifier.py # Orquestador del flujo de notificación
-│   └── webhook_processor.py # Interpreta los eventos del webhook de Meta
+│   ├── webhook_processor.py # Interpreta los eventos del webhook de Meta
+│   ├── backend_client.py    # Cliente HTTP del backend Rust (NotificationBackend)
+│   └── associate_directory.py  # Asociados autorizados en RAM (cargados del backend)
 └── api/
     ├── dependencies.py      # Composition root (inyección de dependencias)
     └── webhook.py           # Router FastAPI (GET/POST /webhook)
+tests/                       # Tests del bot (pytest, sin servicios externos)
 ```
+
+## Integración bot (Python) ↔ backend (Rust)
+
+El bot consume la API del backend (`BACKEND_API_URL`):
+
+- **Al iniciar**: carga los `business_associates` autorizados desde
+  `GET /associates` en memoria (`AssociateDirectory`). Si el backend no
+  responde, usa el respaldo local `ALLOWED_SENDER_NUMBERS`.
+- **Guía recibida (PDF de un asociado)**: tras extraer los datos,
+  `POST /guides` decide si notificar (`created: false` = guía duplicada,
+  no se vuelve a notificar). Tras enviar las plantillas registra cada
+  mensaje con `POST /messages/outgoing` (crea el chat si no existe) y
+  marca la guía con `POST /guides/{number}/notified`.
+- **Mensaje de un usuario final**: `POST /messages/incoming`.
+- **Estados que reporta Meta** (sent/delivered/read):
+  `PATCH /messages/{meta_message_id}/status`.
+
+Todos los teléfonos se normalizan sin '+' en ambos servicios antes de
+guardarse o compararse.
 
 ## Agregar una nueva plantilla de WhatsApp
 
@@ -108,7 +131,13 @@ cd webapp/backend
 cp .env.example .env   # configurar DATABASE_URL y credenciales de Meta
 psql $DATABASE_URL -f db.sql
 cargo run
-cargo test             # 41 tests, no requieren base de datos
+cargo test             # 42 tests, no requieren base de datos
+```
+
+O todo junto con Docker (la DB puede ser externa, ej. Neon):
+
+```bash
+docker compose up --build   # bot (:8000) + backend (:3000)
 ```
 
 ### Estructura

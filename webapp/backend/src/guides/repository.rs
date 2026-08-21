@@ -75,7 +75,7 @@ impl GuideRepositoryTrait for PostgresGuideRepository {
 
     async fn mark_notified(&self, number: &str, timestamp: NaiveDateTime) -> Result<bool, String> {
         let query = r#"
-            UPDATE guides SET last_notification_timestamp = $2 WHERE number = $1
+            UPDATE guides SET last_notification_timestamp = $2::timestamp WHERE number = $1
         "#;
 
         let result = sqlx::query(query)

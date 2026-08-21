@@ -26,6 +26,9 @@ class Settings:
     whatsapp_phone_id: str
     verify_token: str
     deepseek_api_key: str
+    backend_api_url: str
+    # Respaldo local de números autorizados, usado solo si el backend
+    # no responde al iniciar (la fuente principal es la base de datos).
     allowed_sender_numbers: frozenset
     debug_notification_number: str | None = None
     notification_override_number: str | None = None
@@ -43,6 +46,7 @@ class Settings:
             whatsapp_phone_id=os.getenv("WHATSAPP_PHONE_ID", ""),
             verify_token=os.getenv("VERIFY_TOKEN", "my_secret_token"),
             deepseek_api_key=os.getenv("DEEPSEEK_API_KEY", ""),
+            backend_api_url=os.getenv("BACKEND_API_URL", "http://localhost:3000"),
             allowed_sender_numbers=allowed,
             debug_notification_number=os.getenv(
                 "DEBUG_NOTIFICATION_NUMBER", "+573003579384"

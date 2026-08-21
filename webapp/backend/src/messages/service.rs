@@ -9,6 +9,7 @@ use crate::messages::dtos::{
 };
 use crate::messages::meta_client::MetaClientTrait;
 use crate::messages::repository::{MessageRepositoryTrait, NewMessage};
+use crate::tools::phones::normalize_phone;
 use crate::users::repository::UserRepositoryTrait;
 
 /// Ventana de atención al cliente de Meta: tras el último mensaje del
@@ -73,10 +74,11 @@ impl MessageService {
 #[async_trait]
 impl MessageServiceTrait for MessageService {
     async fn get_chat_messages(&self, business_id: i32, user_phone: &str) -> Result<Vec<Message>, String> {
-        self.message_repository.get_messages_by_chat(business_id, user_phone).await
+        self.message_repository.get_messages_by_chat(business_id, &normalize_phone(user_phone)).await
     }
 
     async fn send_free_message(&self, business_id: i32, user_phone: &str, dto: SendMessageDto) -> Result<Message, String> {
+        let user_phone = &normalize_phone(user_phone);
         let chat = self.chat_repository
             .get_chat(business_id, user_phone)
             .await?
@@ -107,14 +109,16 @@ impl MessageServiceTrait for MessageService {
     }
 
     async fn register_incoming(&self, dto: IncomingMessageDto) -> Result<Message, String> {
+        let user_phone = normalize_phone(&dto.user_phone);
+
         self.user_repository
-            .upsert_user(&dto.user_phone, dto.user_name.as_deref().unwrap_or(""))
+            .upsert_user(&user_phone, dto.user_name.as_deref().unwrap_or(""))
             .await?;
 
         let business_id = match dto.business_id {
             Some(id) => id,
             None => self.chat_repository
-                .find_latest_chat_business(&dto.user_phone)
+                .find_latest_chat_business(&user_phone)
                 .await?
                 .ok_or_else(|| "Chat not found for user".to_string())?,
         };
@@ -127,7 +131,7 @@ impl MessageServiceTrait for MessageService {
         self.chat_repository
             .update_last_user_message(
                 business_id,
-                &dto.user_phone,
+                &user_phone,
                 &message_preview(dto.media_type, &dto.message),
                 timestamp,
             )
@@ -136,7 +140,7 @@ impl MessageServiceTrait for MessageService {
         let new_message = NewMessage {
             meta_message_id: dto.meta_message_id,
             business_id,
-            user_id: dto.user_phone,
+            user_id: user_phone,
             media_id: dto.media_id,
             media_type: dto.media_type,
             message: dto.message,
@@ -149,18 +153,20 @@ impl MessageServiceTrait for MessageService {
     }
 
     async fn register_outgoing(&self, dto: OutgoingMessageDto) -> Result<Message, String> {
+        let user_phone = normalize_phone(&dto.user_phone);
+
         self.user_repository
-            .upsert_user(&dto.user_phone, dto.user_name.as_deref().unwrap_or(""))
+            .upsert_user(&user_phone, dto.user_name.as_deref().unwrap_or(""))
             .await?;
 
         self.chat_repository
-            .upsert_chat(dto.business_id, &dto.user_phone)
+            .upsert_chat(dto.business_id, &user_phone)
             .await?;
 
         let new_message = NewMessage {
             meta_message_id: dto.meta_message_id,
             business_id: dto.business_id,
-            user_id: dto.user_phone,
+            user_id: user_phone,
             media_id: dto.media_id,
             media_type: dto.media_type,
             message: dto.message,

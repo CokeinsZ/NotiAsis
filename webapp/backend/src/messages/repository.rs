@@ -46,7 +46,7 @@ impl MessageRepositoryTrait for PostgresMessageRepository {
                 meta_message_id, business_id, user_id,
                 media_id, media_type, message, status, from_user, created_at
             ) VALUES (
-                $1, $2, $3, $4, $5, $6, $7, $8, COALESCE($9, CURRENT_TIMESTAMP)
+                $1, $2, $3, $4, $5, $6, $7, $8, COALESCE($9::timestamp, CURRENT_TIMESTAMP)
             )
             ON CONFLICT (meta_message_id) DO NOTHING
             RETURNING id, meta_message_id, business_id, user_id,

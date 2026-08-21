@@ -37,3 +37,17 @@ class TemplateMessage(ABC):
                 "components": self.build_components(),
             },
         }
+
+    # --- Metadatos para el historial del chat en el backend ---
+
+    def media_type(self) -> str:
+        """Tipo de medio con el que se registra el mensaje (text/document/...)."""
+        return "text"
+
+    def log_message(self) -> str | None:
+        """Texto representativo del mensaje para el historial del chat."""
+        return None
+
+    def log_media_id(self) -> str | None:
+        """Media id adjunto, si la plantilla incluye documento/imagen."""
+        return None

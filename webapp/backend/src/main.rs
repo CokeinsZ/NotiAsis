@@ -77,7 +77,7 @@ async fn main() {
     dotenvy::dotenv().ok();
 
     let database_url = std::env::var("DATABASE_URL")
-        .unwrap_or_else(|_| "postgres://admin:secretpassword@localhost/notiasis".into())
+        .unwrap_or_else(|_| "postgresql://neondb_owner:npg_bR0ixfBtkD1a@ep-silent-bird-achd4b7s-pooler.sa-east-1.aws.neon.tech/neondb?sslmode=require&channel_binding=require".into())
     ;
 
     let pool = PgPoolOptions::new()

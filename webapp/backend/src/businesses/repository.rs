@@ -9,6 +9,8 @@ pub trait BusinessRepositoryTrait: Send + Sync {
     async fn get_business_by_id(&self, id: i32) -> Result<Option<Business>, String>;
     async fn save_associate(&self, business_id: i32, dto: &CreateAssociateDto, password_hash: &str) -> Result<BusinessAssociate, String>;
     async fn get_associates_by_business(&self, business_id: i32) -> Result<Vec<BusinessAssociate>, String>;
+    /// Todos los asociados de empresas activas (lo consulta el bot al iniciar).
+    async fn get_all_associates(&self) -> Result<Vec<BusinessAssociate>, String>;
     async fn get_all_associate_phones(&self) -> Result<Vec<String>, String>;
     async fn username_exists(&self, username: &str) -> Result<bool, String>;
 }
@@ -94,6 +96,21 @@ impl BusinessRepositoryTrait for PostgresBusinessRepository {
 
         sqlx::query_as::<_, BusinessAssociate>(query)
             .bind(business_id)
+            .fetch_all(&self.db_pool)
+            .await
+            .map_err(|e| e.to_string())
+    }
+
+    async fn get_all_associates(&self) -> Result<Vec<BusinessAssociate>, String> {
+        let query = r#"
+            SELECT ba.id, ba.business_id, ba.phone_number, ba.username
+            FROM business_associates ba
+            JOIN businesses b ON b.id = ba.business_id
+            WHERE b.state = 'Active'
+            ORDER BY ba.id
+        "#;
+
+        sqlx::query_as::<_, BusinessAssociate>(query)
             .fetch_all(&self.db_pool)
             .await
             .map_err(|e| e.to_string())

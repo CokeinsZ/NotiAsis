@@ -20,6 +20,13 @@ class MensajeGuiaTemplate(TemplateMessage):
     def name(self) -> str:
         return self.TEMPLATE_NAME
 
+    def log_message(self) -> str | None:
+        return (
+            f"Hola {self._recipient.name}, tu pedido ({self._recipient.product}) "
+            f"va en camino. Guía: {self._recipient.tracking_number}. "
+            f"Dirección: {self._recipient.delivery_address}"
+        )
+
     def build_components(self) -> list[dict]:
         return [
             self._build_body(),

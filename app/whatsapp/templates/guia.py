@@ -19,6 +19,12 @@ class GuiaTemplate(TemplateMessage):
     def name(self) -> str:
         return self.TEMPLATE_NAME
 
+    def media_type(self) -> str:
+        return "document"
+
+    def log_media_id(self) -> str | None:
+        return self._media_id
+
     def build_components(self) -> list[dict]:
         return [
             self._build_header(),

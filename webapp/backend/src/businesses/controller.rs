@@ -113,6 +113,26 @@ async fn get_associates(
     }
 }
 
+/// Todos los asociados de empresas activas (con su business_id).
+/// Lo consulta el bot de Python al iniciar para armar su lista en memoria.
+async fn get_all_associates(
+    State(state): State<BusinessState>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    match state.business_service.get_all_associates().await {
+        Ok(associates) => json_response(
+            StatusCode::OK,
+            serde_json::json!({
+                "message": "Associates retrieved",
+                "associates": associates
+            }),
+        ),
+        Err(e) => json_response(
+            StatusCode::BAD_REQUEST,
+            serde_json::json!({ "message": e }),
+        ),
+    }
+}
+
 /// Números con permiso de enviar guías. Lo consulta el bot de Python
 /// al iniciar para armar su lista en memoria.
 async fn get_associate_phones(
@@ -143,6 +163,7 @@ pub fn business_routes(state: BusinessState) -> Router {
 
 pub fn associate_routes(state: BusinessState) -> Router {
     Router::new()
+        .route("/", get(get_all_associates))
         .route("/phones", get(get_associate_phones))
         .with_state(state)
 }

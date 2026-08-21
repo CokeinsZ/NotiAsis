@@ -4,6 +4,7 @@ use async_trait::async_trait;
 
 use crate::guides::dtos::{Guide, GuideRegistration, RegisterGuideDto};
 use crate::guides::repository::GuideRepositoryTrait;
+use crate::tools::phones::normalize_phone;
 use crate::users::repository::UserRepositoryTrait;
 
 #[async_trait]
@@ -32,11 +33,13 @@ impl GuideService {
 #[async_trait]
 impl GuideServiceTrait for GuideService {
     async fn register_guide(&self, dto: RegisterGuideDto) -> Result<GuideRegistration, String> {
+        let user_phone = normalize_phone(&dto.user_phone);
+
         self.user_repository
-            .upsert_user(&dto.user_phone, dto.user_name.as_deref().unwrap_or(""))
+            .upsert_user(&user_phone, dto.user_name.as_deref().unwrap_or(""))
             .await?;
 
-        if let Some(guide) = self.guide_repository.insert_guide_if_new(&dto.number, &dto.user_phone).await? {
+        if let Some(guide) = self.guide_repository.insert_guide_if_new(&dto.number, &user_phone).await? {
             return Ok(GuideRegistration { guide, created: true });
         }
 

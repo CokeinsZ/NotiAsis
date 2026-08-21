@@ -13,10 +13,16 @@ class WhatsAppClient(MediaRepository, MessageSender):
 
     GRAPH_API_URL = "https://graph.facebook.com/v19.0"
 
-    def __init__(self, access_token: str, phone_number_id: str, timeout: int = 30) -> None:
+    def __init__(
+        self,
+        access_token: str,
+        phone_number_id: str,
+        timeout: int = 30,
+        session: requests.Session | None = None,
+    ) -> None:
         self._phone_number_id = phone_number_id
         self._timeout = timeout
-        self._session = requests.Session()
+        self._session = session or requests.Session()
         self._session.headers.update({"Authorization": f"Bearer {access_token}"})
 
     def get_media_url(self, media_id: str) -> str | None:
@@ -37,13 +43,25 @@ class WhatsAppClient(MediaRepository, MessageSender):
         print(f"Error downloading media: {response.text}")
         return None
 
-    def send_template(self, to_number: str, template: TemplateMessage) -> bool:
-        """Envía cualquier mensaje de plantilla a un número de WhatsApp."""
+    def send_template(self, to_number: str, template: TemplateMessage) -> str | None:
+        """Envía un mensaje de plantilla a un número de WhatsApp.
+
+        Retorna el meta_message_id (wamid) asignado por Meta, necesario
+        para rastrear los estados del mensaje. None si el envío falló.
+        """
         url = f"{self.GRAPH_API_URL}/{self._phone_number_id}/messages"
         payload = template.build_payload(to_number)
         response = self._session.post(url, json=payload, timeout=self._timeout)
         if response.status_code == 200:
-            print(f"Template '{template.name}' sent successfully to {to_number}")
-            return True
+            message_id = self._extract_message_id(response)
+            print(f"Template '{template.name}' sent successfully to {to_number} ({message_id})")
+            return message_id
         print(f"Error sending template '{template.name}' to {to_number}: {response.text}")
-        return False
+        return None
+
+    @staticmethod
+    def _extract_message_id(response: requests.Response) -> str | None:
+        try:
+            return response.json()["messages"][0]["id"]
+        except (KeyError, IndexError, TypeError, ValueError):
+            return None

@@ -87,7 +87,7 @@ impl ChatRepositoryTrait for PostgresChatRepository {
 
     async fn update_last_user_message(&self, business_id: i32, user_id: &str, message: &str, timestamp: NaiveDateTime) -> Result<(), String> {
         let query = r#"
-            INSERT INTO chats (business_id, user_id, last_user_message_timestamp, last_user_message)
+            INSERT INTO chats (business_id, user_id, last_user_message, last_user_message_timestamp)
             VALUES ($1, $2, $3, $4)
             ON CONFLICT (business_id, user_id) DO UPDATE
                 SET last_user_message_timestamp = EXCLUDED.last_user_message_timestamp,
@@ -123,3 +123,4 @@ impl ChatRepositoryTrait for PostgresChatRepository {
         Ok(row.map(|r| r.0))
     }
 }
+

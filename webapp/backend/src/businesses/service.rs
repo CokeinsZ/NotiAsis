@@ -4,6 +4,7 @@ use async_trait::async_trait;
 
 use crate::businesses::dtos::{Business, BusinessAssociate, CreateAssociateDto, CreateBusinessDto};
 use crate::businesses::repository::BusinessRepositoryTrait;
+use crate::tools::phones::normalize_phone;
 
 #[async_trait]
 pub trait BusinessServiceTrait: Send + Sync {
@@ -12,6 +13,7 @@ pub trait BusinessServiceTrait: Send + Sync {
     async fn get_business(&self, id: i32) -> Result<Business, String>;
     async fn create_associate(&self, business_id: i32, dto: CreateAssociateDto) -> Result<BusinessAssociate, String>;
     async fn get_associates(&self, business_id: i32) -> Result<Vec<BusinessAssociate>, String>;
+    async fn get_all_associates(&self) -> Result<Vec<BusinessAssociate>, String>;
     async fn get_associate_phones(&self) -> Result<Vec<String>, String>;
 }
 
@@ -54,6 +56,10 @@ impl BusinessServiceTrait for BusinessService {
         let password_hash = bcrypt::hash(&dto.password, bcrypt::DEFAULT_COST)
             .map_err(|e| e.to_string())?;
 
+        let dto = CreateAssociateDto {
+            phone_number: normalize_phone(&dto.phone_number),
+            ..dto
+        };
         self.repository.save_associate(business_id, &dto, &password_hash).await
     }
 
@@ -62,6 +68,10 @@ impl BusinessServiceTrait for BusinessService {
             return Err("Business not found".to_string());
         }
         self.repository.get_associates_by_business(business_id).await
+    }
+
+    async fn get_all_associates(&self) -> Result<Vec<BusinessAssociate>, String> {
+        self.repository.get_all_associates().await
     }
 
     async fn get_associate_phones(&self) -> Result<Vec<String>, String> {
@@ -128,6 +138,18 @@ mod tests {
         async fn get_associates_by_business(&self, business_id: i32) -> Result<Vec<BusinessAssociate>, String> {
             Ok(self.associates.lock().unwrap().iter()
                 .filter(|(bid, _, _)| *bid == business_id)
+                .enumerate()
+                .map(|(i, (bid, dto, _))| BusinessAssociate {
+                    id: i as i32 + 1,
+                    business_id: *bid,
+                    phone_number: dto.phone_number.clone(),
+                    username: dto.username.clone(),
+                })
+                .collect())
+        }
+
+        async fn get_all_associates(&self) -> Result<Vec<BusinessAssociate>, String> {
+            Ok(self.associates.lock().unwrap().iter()
                 .enumerate()
                 .map(|(i, (bid, dto, _))| BusinessAssociate {
                     id: i as i32 + 1,
