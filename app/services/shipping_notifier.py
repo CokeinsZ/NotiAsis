@@ -15,7 +15,7 @@ from app.whatsapp.templates.mensaje_guia import MensajeGuiaTemplate
 
 # Plantillas que se envían por cada guía recibida, en orden de envío:
 # primero el PDF de la guía y luego el mensaje con la información extraída.
-DEFAULT_TEMPLATE_FACTORIES: tuple = (GuiaTemplate, MensajeGuiaTemplate)
+DEFAULT_TEMPLATE_FACTORIES: list = [GuiaTemplate, MensajeGuiaTemplate]
 
 
 class ShippingNotificationService:
@@ -109,7 +109,13 @@ class ShippingNotificationService:
 
         # Mientras NOTIFICATION_OVERRIDE_NUMBER esté configurado, todas las
         # notificaciones se desvían a ese número (útil en pruebas).
-        target_number = self._notification_override_number or recipient.phone
+        target_number = recipient.phone
+        if self._notification_override_number:
+            print(
+                f"Notification override is active. All messages will be sent to "
+                f"{self._notification_override_number} instead of {recipient.phone}."
+            )
+            target_number = self._notification_override_number
 
         sent_templates: list[tuple[TemplateMessage, str]] = []
         for template in templates:
@@ -120,6 +126,10 @@ class ShippingNotificationService:
         # Copia de depuración a un número interno, si está configurado.
         debug_number = self._debug_notification_number
         if debug_number and debug_number != target_number:
+            print(
+                f"Debug notification is active. A copy of the messages will be sent to "
+                f"{debug_number}."
+            )
             for template in templates:
                 self._message_sender.send_template(debug_number, template)
 
