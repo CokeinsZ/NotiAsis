@@ -96,3 +96,65 @@ Ver `.env.example`. Los números autorizados (`ALLOWED_SENDER_NUMBERS`), el
 número de copia de depuración (`DEBUG_NOTIFICATION_NUMBER`) y el desvío de
 notificaciones para pruebas (`NOTIFICATION_OVERRIDE_NUMBER`) son
 configurables por variables de entorno.
+
+## Backend web (Rust + Axum + PostgreSQL)
+
+En `webapp/backend/`. API REST para la interfaz web (bandeja de chats,
+historial de mensajes y envío de mensajes libres dentro de la ventana de
+24h de Meta) y para el bot (registro de mensajes, estados y guías).
+
+```bash
+cd webapp/backend
+cp .env.example .env   # configurar DATABASE_URL y credenciales de Meta
+psql $DATABASE_URL -f db.sql
+cargo run
+cargo test             # 41 tests, no requieren base de datos
+```
+
+### Estructura
+
+Cada módulo sigue la organización de `src-EJEMPLO`:
+`dtos.rs` (modelos y validación) · `repository.rs` (trait + impl PostgreSQL)
+· `service.rs` (trait + lógica de negocio) · `controller.rs` (rutas HTTP).
+
+```
+src/
+├── main.rs        # build_app: composition root (pool, servicios, rutas)
+├── state.rs       # Estados inyectados en los handlers
+├── tools/         # responses y validadores compartidos
+├── businesses/    # Empresas y asociados (quiénes pueden enviar guías)
+├── users/         # Clientes finales (destinatarios de las guías)
+├── chats/         # Bandeja de entrada + mensajes del chat + envío libre
+├── messages/      # Registro incoming/outgoing, estados, cliente de Meta
+└── guides/        # Registro y deduplicación de guías
+```
+
+### Endpoints
+
+Para la webapp:
+
+| Método | Ruta | Descripción |
+|---|---|---|
+| POST | `/businesses` | Crear empresa |
+| GET | `/businesses` · `/businesses/{id}` | Listar / detalle |
+| POST | `/businesses/{id}/associates` | Crear asociado (password con bcrypt) |
+| GET | `/businesses/{id}/associates` | Listar asociados |
+| GET | `/users` · `/users/{phone}` | Clientes finales |
+| GET | `/chats?business_id={id}` | Bandeja: último mensaje + `window_open` |
+| GET | `/chats/{business_id}/{user_phone}/messages` | Historial del chat |
+| POST | `/chats/{business_id}/{user_phone}/messages` | Enviar mensaje libre (422 si la ventana de 24h está cerrada) |
+| GET | `/guides?user_phone=` | Guías registradas |
+
+Para el bot (Python):
+
+| Método | Ruta | Descripción |
+|---|---|---|
+| GET | `/associates/phones` | Números autorizados (reemplaza `ALLOWED_SENDER_NUMBERS`) |
+| POST | `/messages/incoming` | Registrar mensaje entrante del webhook |
+| POST | `/messages/outgoing` | Registrar plantilla enviada |
+| PATCH | `/messages/{meta_message_id}/status` | Actualizar estado (`sent`/`delivered`/`read`) |
+| POST | `/guides` | Registrar guía; responde `created: false` si es duplicada (no re-notificar) |
+| POST | `/guides/{number}/notified` | Marcar cuándo se notificó la guía |
+
+Pendiente: autenticación de los asociados en la webapp (la tabla ya tiene
+`password_hash`).
