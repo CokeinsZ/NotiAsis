@@ -23,6 +23,13 @@ pub struct BusinessState {
     pub global_state: Arc<AppState>,
 }
 
+/// Estado para las rutas administrativas de asociados (cambio de contraseña).
+#[derive(Clone)]
+pub struct AssociateAdminState {
+    pub auth_service: Arc<dyn AuthServiceTrait>,
+    pub global_state: Arc<AppState>,
+}
+
 #[derive(Clone)]
 pub struct UserState {
     pub user_service: Arc<dyn UserServiceTrait>,

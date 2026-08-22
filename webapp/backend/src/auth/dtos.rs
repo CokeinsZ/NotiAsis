@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use validator::Validate;
 
-use crate::tools::custom_validators::validate_non_blank;
+use crate::tools::custom_validators::{validate_non_blank, validate_password};
 
 /// Duración del token de un business associate (webapp).
 pub const ASSOCIATE_TOKEN_MINUTES: i64 = 15;
@@ -21,6 +21,15 @@ pub struct LoginDto {
 pub struct ApiKeyLoginDto {
     #[validate(custom(function = "validate_non_blank"))]
     pub api_key: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, Validate)]
+pub struct ChangePasswordDto {
+    #[validate(custom(function = "validate_non_blank"))]
+    pub current_password: String,
+
+    #[validate(custom(function = "validate_password"))]
+    pub new_password: String,
 }
 
 /// Claims del JWT. `kind` distingue el origen del token:

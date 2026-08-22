@@ -9,7 +9,7 @@ services:
       - WHATSAPP_PHONE_ID=${WHATSAPP_PHONE_ID}
       - VERIFY_TOKEN=${VERIFY_TOKEN}
       - DEEPSEEK_API_KEY=${DEEPSEEK_API_KEY}
-      - BACKEND_API_URL=http://backend:3000
+      - BACKEND_API_URL=${BACKEND_API_URL}
       - BACKEND_API_KEY=${BACKEND_API_KEY}
       - DEBUG_NOTIFICATION_NUMBER=${DEBUG_NOTIFICATION_NUMBER:-}
       - NOTIFICATION_OVERRIDE_NUMBER=${NOTIFICATION_OVERRIDE_NUMBER:-}
@@ -27,7 +27,7 @@ services:
       - WHATSAPP_TOKEN=${WHATSAPP_TOKEN}
       - WHATSAPP_PHONE_ID=${WHATSAPP_PHONE_ID}
       - JWT_SECRET=${JWT_SECRET}
-      - PORT=3000
+      - PORT=3001
     restart: unless-stopped
 
   frontend:
@@ -36,7 +36,6 @@ services:
     ports:
       - 3000
     environment:
-      # URL interna del backend (la usa el servidor de Next, no el navegador)
       - BACKEND_URL=${BACKEND_API_URL}
     depends_on:
       - backend

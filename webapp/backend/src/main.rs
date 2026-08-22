@@ -11,14 +11,14 @@ mod state;
 mod tools;
 mod users;
 
-use auth::controller::auth_routes;
+use auth::controller::{associate_admin_routes, auth_routes};
 use auth::service::AuthServiceTrait;
 use businesses::controller::{associate_routes, business_routes};
 use chats::controller::chat_routes;
 use guides::controller::guide_routes;
 use messages::controller::message_routes;
 use messages::meta_client::MetaClientTrait;
-use state::{AppState, AuthState, BusinessState, ChatState, GuideState, MessageState, UserState};
+use state::{AppState, AssociateAdminState, AuthState, BusinessState, ChatState, GuideState, MessageState, UserState};
 use users::controller::user_routes;
 
 fn build_app(pool: sqlx::PgPool, meta_client: Arc<dyn MetaClientTrait>, jwt_secret: String) -> Router {
@@ -51,6 +51,10 @@ fn build_app(pool: sqlx::PgPool, meta_client: Arc<dyn MetaClientTrait>, jwt_secr
         auth_service: auth_service.clone(),
         global_state: app_state_pointer.clone(),
     };
+    let associate_admin_state = AssociateAdminState {
+        auth_service: auth_service.clone(),
+        global_state: app_state_pointer.clone(),
+    };
     let business_state = BusinessState {
         business_service,
         global_state: app_state_pointer.clone(),
@@ -74,10 +78,14 @@ fn build_app(pool: sqlx::PgPool, meta_client: Arc<dyn MetaClientTrait>, jwt_secr
         global_state: app_state_pointer.clone(),
     };
 
+    // Rutas de asociados: consulta (BusinessState) + administración (AssociateAdminState)
+    let associates_router = associate_routes(business_state.clone())
+        .merge(associate_admin_routes(associate_admin_state));
+
     // Todos los módulos excepto /auth requieren un JWT válido.
     let protected = Router::new()
         .nest("/businesses", business_routes(business_state.clone()))
-        .nest("/associates", associate_routes(business_state))
+        .nest("/associates", associates_router)
         .nest("/users", user_routes(user_state))
         .nest("/chats", chat_routes(chat_state))
         .nest("/messages", message_routes(message_state))

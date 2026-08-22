@@ -5,7 +5,8 @@ use chrono::{Duration, Utc};
 use jsonwebtoken::{DecodingKey, EncodingKey, Header, Validation, decode, encode};
 
 use crate::auth::dtos::{
-    API_KEY_TOKEN_HOURS, ASSOCIATE_TOKEN_MINUTES, ApiKeyLoginDto, Claims, LoginDto, TokenResponse,
+    API_KEY_TOKEN_HOURS, ASSOCIATE_TOKEN_MINUTES, ApiKeyLoginDto, ChangePasswordDto, Claims,
+    LoginDto, TokenResponse,
 };
 use crate::auth::repository::AuthRepositoryTrait;
 
@@ -19,6 +20,14 @@ pub trait AuthServiceTrait: Send + Sync {
     fn validate_token(&self, token: &str) -> Result<Claims, String>;
     /// Emite un token nuevo con los mismos claims (renovación).
     fn renew_token(&self, claims: &Claims) -> Result<TokenResponse, String>;
+    /// Cambia la contraseña de un asociado. Solo el dueño de la cuenta
+    /// (requester_phone = phone_number del JWT) puede cambiarla.
+    async fn change_password(
+        &self,
+        associate_id: i32,
+        requester_phone: &str,
+        dto: ChangePasswordDto,
+    ) -> Result<(), String>;
 }
 
 pub struct AuthService {
@@ -110,6 +119,36 @@ impl AuthServiceTrait for AuthService {
             .map_err(|e| e.to_string())
     }
 
+    async fn change_password(
+        &self,
+        associate_id: i32,
+        requester_phone: &str,
+        dto: ChangePasswordDto,
+    ) -> Result<(), String> {
+        let credentials = self.repository
+            .find_associate_by_id(associate_id)
+            .await?
+            .ok_or_else(|| "Associate not found".to_string())?;
+
+        if credentials.phone_number != requester_phone {
+            return Err("You can only change your own password".to_string());
+        }
+
+        let valid = bcrypt::verify(&dto.current_password, &credentials.password_hash)
+            .map_err(|e| e.to_string())?;
+        if !valid {
+            return Err("Current password is incorrect".to_string());
+        }
+
+        let new_hash = bcrypt::hash(&dto.new_password, bcrypt::DEFAULT_COST)
+            .map_err(|e| e.to_string())?;
+        self.repository
+            .update_associate_password(associate_id, &new_hash)
+            .await?;
+
+        Ok(())
+    }
+
     fn renew_token(&self, claims: &Claims) -> Result<TokenResponse, String> {
         let duration = match claims.kind.as_str() {
             "associate" => Duration::minutes(ASSOCIATE_TOKEN_MINUTES),
@@ -133,12 +172,22 @@ mod tests {
     struct FakeAuthRepository {
         associate: Option<AssociateCredentials>,
         api_key_id: Option<i32>,
+        updated_hash: std::sync::Mutex<Option<String>>,
     }
 
     #[async_trait]
     impl AuthRepositoryTrait for FakeAuthRepository {
         async fn find_associate_by_username(&self, _: &str) -> Result<Option<AssociateCredentials>, String> {
             Ok(self.associate.clone())
+        }
+
+        async fn find_associate_by_id(&self, _: i32) -> Result<Option<AssociateCredentials>, String> {
+            Ok(self.associate.clone())
+        }
+
+        async fn update_associate_password(&self, _: i32, password_hash: &str) -> Result<bool, String> {
+            *self.updated_hash.lock().unwrap() = Some(password_hash.to_string());
+            Ok(true)
         }
 
         async fn find_api_key_id(&self, _: &str) -> Result<Option<i32>, String> {
@@ -158,7 +207,11 @@ mod tests {
             None
         };
         AuthService::new(
-            Arc::new(FakeAuthRepository { associate, api_key_id }),
+            Arc::new(FakeAuthRepository {
+                associate,
+                api_key_id,
+                updated_hash: std::sync::Mutex::new(None),
+            }),
             "test-secret".to_string(),
         )
     }
@@ -232,10 +285,77 @@ mod tests {
             .unwrap();
 
         let other = AuthService::new(
-            Arc::new(FakeAuthRepository { associate: None, api_key_id: None }),
+            Arc::new(FakeAuthRepository {
+                associate: None,
+                api_key_id: None,
+                updated_hash: std::sync::Mutex::new(None),
+            }),
             "otro-secret".to_string(),
         );
         assert!(other.validate_token(&response.token).is_err());
+    }
+
+    #[tokio::test]
+    async fn change_password_ok() {
+        let repository = Arc::new(FakeAuthRepository {
+            associate: Some(AssociateCredentials {
+                username: "stiven".to_string(),
+                phone_number: "573003579384".to_string(),
+                business_id: 7,
+                password_hash: bcrypt::hash("Passw0rd", 4).unwrap(),
+            }),
+            api_key_id: None,
+            updated_hash: std::sync::Mutex::new(None),
+        });
+        let service = AuthService::new(repository.clone(), "test-secret".to_string());
+
+        service
+            .change_password(1, "573003579384", ChangePasswordDto {
+                current_password: "Passw0rd".into(),
+                new_password: "NuevaClave99".into(),
+            })
+            .await
+            .unwrap();
+
+        let new_hash = repository.updated_hash.lock().unwrap().clone().unwrap();
+        assert!(bcrypt::verify("NuevaClave99", &new_hash).unwrap());
+        assert!(!bcrypt::verify("Passw0rd", &new_hash).unwrap());
+    }
+
+    #[tokio::test]
+    async fn change_password_wrong_current_fails() {
+        let service = build_service(true, None);
+        let result = service
+            .change_password(1, "573003579384", ChangePasswordDto {
+                current_password: "Incorrecta1".into(),
+                new_password: "NuevaClave99".into(),
+            })
+            .await;
+        assert_eq!(result.unwrap_err(), "Current password is incorrect");
+    }
+
+    #[tokio::test]
+    async fn change_password_of_another_associate_fails() {
+        let service = build_service(true, None);
+        let result = service
+            .change_password(1, "579999999999", ChangePasswordDto {
+                current_password: "Passw0rd".into(),
+                new_password: "NuevaClave99".into(),
+            })
+            .await;
+        assert_eq!(result.unwrap_err(), "You can only change your own password");
+    }
+
+    #[tokio::test]
+    async fn change_password_unknown_associate_fails() {
+        let service = build_service(false, None);
+        let result = service
+            .change_password(999, "573003579384", ChangePasswordDto {
+                current_password: "Passw0rd".into(),
+                new_password: "NuevaClave99".into(),
+            })
+            .await;
+        assert_eq!(result.unwrap_err(), "Associate not found");
     }
 
     #[tokio::test]

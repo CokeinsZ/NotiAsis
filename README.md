@@ -134,6 +134,7 @@ Todo el backend requiere `Authorization: Bearer <token>`, excepto `/auth/*`:
 |---|---|---|
 | POST | `/auth/login` | Asociado (usuario + contraseña) → JWT de **15 min** con `business_id` y `phone_number` |
 | POST | `/auth/api-key` | Bot (api_key de la tabla `api_keys`) → JWT de **24h**, acceso global |
+| PATCH | `/associates/{id}/password` | Cambio de contraseña: pide la actual; solo el dueño de la cuenta (match con `phone_number` del JWT) |
 
 - Los asociados solo acceden a los recursos de **su** business (403 si no).
 - Cada mensaje libre enviado renueva el token del asociado otros 15 min

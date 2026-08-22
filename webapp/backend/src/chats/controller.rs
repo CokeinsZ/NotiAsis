@@ -200,6 +200,15 @@ mod tests {
             unimplemented!()
         }
 
+        async fn change_password(
+            &self,
+            _: i32,
+            _: &str,
+            _: crate::auth::dtos::ChangePasswordDto,
+        ) -> Result<(), String> {
+            unimplemented!()
+        }
+
         fn validate_token(&self, token: &str) -> Result<Claims, String> {
             match token {
                 "valido" => Ok(Claims {
