@@ -111,5 +111,11 @@ CREATE TABLE IF NOT EXISTS invoices (
 		ON UPDATE CASCADE
 );
 
+CREATE TABLE IF NOT EXISTS api_keys (
+	id SERIAL PRIMARY KEY,
+	key VARCHAR(255) UNIQUE NOT NULL,
+	created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
 CREATE INDEX IF NOT EXISTS idx_messages_chat_time ON messages (business_id, user_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_messages_meta_id ON messages (meta_message_id);

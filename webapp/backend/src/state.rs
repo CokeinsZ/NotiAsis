@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use crate::auth::service::AuthServiceTrait;
 use crate::businesses::service::BusinessServiceTrait;
 use crate::chats::service::ChatServiceTrait;
 use crate::guides::service::GuideServiceTrait;
@@ -8,6 +9,12 @@ use crate::users::service::UserServiceTrait;
 
 #[derive(Clone)]
 pub struct AppState {
+}
+
+#[derive(Clone)]
+pub struct AuthState {
+    pub auth_service: Arc<dyn AuthServiceTrait>,
+    pub global_state: Arc<AppState>,
 }
 
 #[derive(Clone)]
@@ -26,6 +33,7 @@ pub struct UserState {
 pub struct ChatState {
     pub chat_service: Arc<dyn ChatServiceTrait>,
     pub message_service: Arc<dyn MessageServiceTrait>,
+    pub auth_service: Arc<dyn AuthServiceTrait>,
     pub global_state: Arc<AppState>,
 }
 

@@ -22,7 +22,9 @@ export function remainingGrace(lastUserMessageTimestamp: string | null, now: Dat
   }
 
   const elapsed = now.getTime() - parseUtc(lastUserMessageTimestamp).getTime();
-  const remaining = WINDOW_MS - elapsed;
+  // Se capea al máximo de la ventana: un timestamp "futuro" (relojes
+  // desincronizados) no debe mostrar más de 24h.
+  const remaining = Math.min(WINDOW_MS - elapsed, WINDOW_MS);
 
   if (remaining <= 0) {
     return { open: false, label: "Ventana cerrada" };

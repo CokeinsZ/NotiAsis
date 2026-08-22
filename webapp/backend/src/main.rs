@@ -1,7 +1,8 @@
-use axum::Router;
+use axum::{Router, middleware};
 use sqlx::postgres::PgPoolOptions;
 use std::sync::Arc;
 
+mod auth;
 mod businesses;
 mod chats;
 mod guides;
@@ -10,18 +11,21 @@ mod state;
 mod tools;
 mod users;
 
+use auth::controller::auth_routes;
+use auth::service::AuthServiceTrait;
 use businesses::controller::{associate_routes, business_routes};
 use chats::controller::chat_routes;
 use guides::controller::guide_routes;
 use messages::controller::message_routes;
 use messages::meta_client::MetaClientTrait;
-use state::{AppState, BusinessState, ChatState, GuideState, MessageState, UserState};
+use state::{AppState, AuthState, BusinessState, ChatState, GuideState, MessageState, UserState};
 use users::controller::user_routes;
 
-fn build_app(pool: sqlx::PgPool, meta_client: Arc<dyn MetaClientTrait>) -> Router {
+fn build_app(pool: sqlx::PgPool, meta_client: Arc<dyn MetaClientTrait>, jwt_secret: String) -> Router {
     let app_state_pointer = Arc::new(AppState { });
 
     // Repositorios (comparten el pool de conexiones)
+    let auth_repository = Arc::new(auth::repository::PostgresAuthRepository::new(pool.clone()));
     let business_repository = Arc::new(businesses::repository::PostgresBusinessRepository::new(pool.clone()));
     let user_repository = Arc::new(users::repository::PostgresUserRepository::new(pool.clone()));
     let chat_repository = Arc::new(chats::repository::PostgresChatRepository::new(pool.clone()));
@@ -29,6 +33,8 @@ fn build_app(pool: sqlx::PgPool, meta_client: Arc<dyn MetaClientTrait>) -> Route
     let guide_repository = Arc::new(guides::repository::PostgresGuideRepository::new(pool.clone()));
 
     // Servicios
+    let auth_service: Arc<dyn AuthServiceTrait> =
+        Arc::new(auth::service::AuthService::new(auth_repository, jwt_secret));
     let business_service = Arc::new(businesses::service::BusinessService::new(business_repository));
     let user_service = Arc::new(users::service::UserService::new(user_repository.clone()));
     let chat_service = Arc::new(chats::service::ChatService::new(chat_repository.clone()));
@@ -41,6 +47,10 @@ fn build_app(pool: sqlx::PgPool, meta_client: Arc<dyn MetaClientTrait>) -> Route
     let guide_service = Arc::new(guides::service::GuideService::new(guide_repository, user_repository));
 
     // Estados por módulo
+    let auth_state = AuthState {
+        auth_service: auth_service.clone(),
+        global_state: app_state_pointer.clone(),
+    };
     let business_state = BusinessState {
         business_service,
         global_state: app_state_pointer.clone(),
@@ -52,6 +62,7 @@ fn build_app(pool: sqlx::PgPool, meta_client: Arc<dyn MetaClientTrait>) -> Route
     let chat_state = ChatState {
         chat_service,
         message_service: message_service.clone(),
+        auth_service: auth_service.clone(),
         global_state: app_state_pointer.clone(),
     };
     let message_state = MessageState {
@@ -63,13 +74,22 @@ fn build_app(pool: sqlx::PgPool, meta_client: Arc<dyn MetaClientTrait>) -> Route
         global_state: app_state_pointer.clone(),
     };
 
-    Router::new()
+    // Todos los módulos excepto /auth requieren un JWT válido.
+    let protected = Router::new()
         .nest("/businesses", business_routes(business_state.clone()))
         .nest("/associates", associate_routes(business_state))
         .nest("/users", user_routes(user_state))
         .nest("/chats", chat_routes(chat_state))
         .nest("/messages", message_routes(message_state))
         .nest("/guides", guide_routes(guide_state))
+        .layer(middleware::from_fn_with_state(
+            auth_service,
+            auth::middleware::require_auth,
+        ));
+
+    Router::new()
+        .nest("/auth", auth_routes(auth_state))
+        .merge(protected)
 }
 
 #[tokio::main]
@@ -77,7 +97,7 @@ async fn main() {
     dotenvy::dotenv().ok();
 
     let database_url = std::env::var("DATABASE_URL")
-        .unwrap_or_else(|_| "postgresql://neondb_owner:npg_bR0ixfBtkD1a@ep-silent-bird-achd4b7s-pooler.sa-east-1.aws.neon.tech/neondb?sslmode=require&channel_binding=require".into())
+        .unwrap_or_else(|_| "postgres://admin:secretpassword@localhost/notiasis".into())
     ;
 
     let pool = PgPoolOptions::new()
@@ -93,9 +113,11 @@ async fn main() {
         std::env::var("WHATSAPP_PHONE_ID").expect("WHATSAPP_PHONE_ID must be set"),
     ));
 
-    let app = build_app(pool, meta_client);
+    let jwt_secret = std::env::var("JWT_SECRET").expect("JWT_SECRET must be set");
 
-    let port = std::env::var("PORT").unwrap_or_else(|_| "3001".into());
+    let app = build_app(pool, meta_client, jwt_secret);
+
+    let port = std::env::var("PORT").unwrap_or_else(|_| "3000".into());
     let listener = tokio::net::TcpListener::bind(format!("0.0.0.0:{port}"))
         .await
         .unwrap()
@@ -125,7 +147,7 @@ mod tests {
             messages::meta_client::MetaClient::new("dummy".into(), "dummy".into())
         );
 
-        build_app(pool, meta_client)
+        build_app(pool, meta_client, "test-secret".into())
     }
 
     #[tokio::test]
@@ -135,40 +157,44 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn invalid_incoming_payload_returns_400_without_db() {
+    async fn protected_routes_require_token() {
+        // Sin token: 401 sin tocar la base de datos.
+        for uri in [
+            "/chats?business_id=1",
+            "/businesses",
+            "/users",
+            "/associates",
+            "/guides",
+            "/messages/incoming",
+        ] {
+            let response = create_app_without_db()
+                .oneshot(Request::builder().uri(uri).method("GET").body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::UNAUTHORIZED, "uri: {uri}");
+        }
+    }
+
+    #[tokio::test]
+    async fn auth_routes_do_not_require_token() {
+        // Login con credenciales inválidas debe llegar al servicio y
+        // responder 401/400 (no quedar bloqueado por el middleware).
         let response = create_app_without_db()
             .oneshot(
                 Request::builder()
-                    .uri("/messages/incoming")
+                    .uri("/auth/login")
                     .method("POST")
                     .header("Content-Type", "application/json")
-                    .body(Body::from(r#"{"user_phone": "123", "meta_message_id": "wamid.x", "media_type": "text"}"#))
+                    .body(Body::from(r#"{"username": "", "password": ""}"#))
                     .unwrap(),
             )
             .await
             .unwrap();
 
-        // Falla la validación del DTO antes de tocar la base de datos.
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
 
         let body_bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
         let body_json: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
         assert_eq!(body_json["message"], "Invalid data");
-    }
-
-    #[tokio::test]
-    async fn chats_query_validation_runs_before_db() {
-        let response = create_app_without_db()
-            .oneshot(
-                Request::builder()
-                    .uri("/chats?business_id=0")
-                    .method("GET")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-
-        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     }
 }

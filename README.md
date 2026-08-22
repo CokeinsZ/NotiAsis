@@ -126,6 +126,21 @@ En `webapp/backend/`. API REST para la interfaz web (bandeja de chats,
 historial de mensajes y envío de mensajes libres dentro de la ventana de
 24h de Meta) y para el bot (registro de mensajes, estados y guías).
 
+### Autenticación (JWT)
+
+Todo el backend requiere `Authorization: Bearer <token>`, excepto `/auth/*`:
+
+| Método | Ruta | Descripción |
+|---|---|---|
+| POST | `/auth/login` | Asociado (usuario + contraseña) → JWT de **15 min** con `business_id` y `phone_number` |
+| POST | `/auth/api-key` | Bot (api_key de la tabla `api_keys`) → JWT de **24h**, acceso global |
+
+- Los asociados solo acceden a los recursos de **su** business (403 si no).
+- Cada mensaje libre enviado renueva el token del asociado otros 15 min
+  (la respuesta incluye `renewed_token`).
+- El bot lee `BACKEND_API_KEY` del entorno, obtiene su JWT solo, y lo
+  renueva automáticamente si recibe un 401.
+
 ```bash
 cd webapp/backend
 cp .env.example .env   # configurar DATABASE_URL y credenciales de Meta
@@ -145,8 +160,9 @@ docker compose up --build   # bot (:8000) + backend (:3000) + frontend (:3001)
 En `webapp/frontend/`. Interfaz de conversaciones sobre fondo negro con
 acentos azul claro de luna:
 
-- **`/`** — selector de empresa (mientras no hay autenticación).
-- **`/chats/{businessId}`** — bandeja de conversaciones:
+- **`/login`** — acceso con usuario y contraseña del asociado.
+- **`/chats/{businessId}`** — bandeja de conversaciones (requiere JWT del
+  business correspondiente; sin token redirige a `/login`):
   - Panel izquierdo: chats ordenados por el último mensaje del usuario
     (más reciente arriba), cada uno con nombre, **tiempo de gracia
     restante** de la ventana de 24h y el último mensaje del usuario.
@@ -211,5 +227,6 @@ Para el bot (Python):
 | POST | `/guides` | Registrar guía; responde `created: false` si es duplicada (no re-notificar) |
 | POST | `/guides/{number}/notified` | Marcar cuándo se notificó la guía |
 
-Pendiente: autenticación de los asociados en la webapp (la tabla ya tiene
-`password_hash`).
+La sesión usa JWT en `localStorage` (15 min, renovado automáticamente al
+enviar mensajes libres). Pendiente: refresh tokens y cookies httpOnly para
+una sesión más robusta.

@@ -14,6 +14,7 @@ class Settings:
     verify_token: str
     deepseek_api_key: str
     backend_api_url: str
+    backend_api_key: str
     # Respaldo local de números autorizados, usado solo si el backend
     # no responde al iniciar (la fuente principal es la base de datos).
     allowed_sender_numbers: frozenset
@@ -22,7 +23,7 @@ class Settings:
 
     @classmethod
     def from_env(cls) -> "Settings":
-        raw_allowed = os.getenv("ALLOWED_SENDER_NUMBERS")
+        raw_allowed = os.getenv("ALLOWED_SENDER_NUMBERS") or ""
         allowed = frozenset(
             number.strip() for number in raw_allowed.split(",") if number.strip()
         )
@@ -32,6 +33,7 @@ class Settings:
             verify_token=os.getenv("VERIFY_TOKEN", "my_secret_token"),
             deepseek_api_key=os.getenv("DEEPSEEK_API_KEY", ""),
             backend_api_url=os.getenv("BACKEND_API_URL", "http://backend:3001"),
+            backend_api_key=os.getenv("BACKEND_API_KEY", ""),
             allowed_sender_numbers=allowed,
             debug_notification_number=os.getenv("DEBUG_NOTIFICATION_NUMBER"),
             notification_override_number=os.getenv("NOTIFICATION_OVERRIDE_NUMBER"),

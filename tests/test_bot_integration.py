@@ -373,3 +373,107 @@ def test_send_template_error_returns_none():
     from app.whatsapp.templates.guia import GuiaTemplate
     recipient = RecipientInfo(name="Juan", phone="573001234567")
     assert client.send_template("573001234567", GuiaTemplate(recipient, "MEDIA1")) is None
+
+
+# ------------------------------ BackendClient auth ------------------------------
+
+
+class FakeAuthSession:
+    """Simula el backend: login con api_key y 401 cuando el token venció."""
+
+    def __init__(self):
+        self.headers = {}
+        self.logins = 0
+        self.requests = []
+        self.valid_token = "token-v1"
+        self.expire_first_token = False
+
+    class _Resp:
+        def __init__(self, status_code, payload):
+            self.status_code = status_code
+            self._payload = payload
+            self.text = str(payload)
+
+        def json(self):
+            return self._payload
+
+        def raise_for_status(self):
+            if self.status_code >= 400:
+                raise Exception(f"HTTP {self.status_code}")
+
+    def post(self, url, json=None, timeout=None, headers=None):
+        return self._handle("POST", url, json, headers)
+
+    def get(self, url, timeout=None, headers=None):
+        return self._handle("GET", url, None, headers)
+
+    def patch(self, url, json=None, timeout=None, headers=None):
+        return self._handle("PATCH", url, json, headers)
+
+    def request(self, method, url, headers=None, timeout=None, **kwargs):
+        return self._handle(method, url, kwargs.get("json"), headers)
+
+    def _handle(self, method, url, json, headers):
+        if url.endswith("/auth/api-key"):
+            self.logins += 1
+            if json.get("api_key") == "key-valida":
+                return self._Resp(200, {"token": self.valid_token, "expires_in": 86400})
+            return self._Resp(401, {"message": "Invalid api key"})
+
+        self.requests.append((method, url, headers))
+        token = (headers or {}).get("Authorization", "").removeprefix("Bearer ")
+        if token != self.valid_token:
+            return self._Resp(401, {"message": "Invalid or expired token"})
+        if url.endswith("/associates"):
+            return self._Resp(200, {"associates": [{"phone_number": "573003579384", "business_id": 1}]})
+        return self._Resp(200, {"created": True})
+
+
+def test_client_logs_in_and_sends_bearer_token():
+    from app.services.backend_client import RustBackendClient
+
+    client = RustBackendClient("http://fake", api_key="key-valida")
+    session = FakeAuthSession()
+    client._session = session
+
+    associates = client.fetch_authorized_associates()
+
+    assert session.logins == 1
+    assert associates == {"573003579384": 1}
+    assert session.requests[0][2]["Authorization"] == "Bearer token-v1"
+
+
+def test_client_relogs_on_401_and_retries_once():
+    from app.services.backend_client import RustBackendClient
+
+    client = RustBackendClient("http://fake", api_key="key-valida")
+    session = FakeAuthSession()
+    client._session = session
+
+    client.fetch_authorized_associates()   # login + request con token-v1
+    session.valid_token = "token-v2"       # el servidor rota el token esperado
+
+    client.fetch_authorized_associates()   # 401 con v1 → re-login (v2) → retry 200
+
+    assert session.logins == 2
+    assert session.requests[-1][2]["Authorization"] == "Bearer token-v2"
+
+
+def test_client_survives_backend_down():
+    from app.services.backend_client import RustBackendClient
+
+    client = RustBackendClient("http://fake", api_key="key-valida")
+
+    class DownSession:
+        headers = {}
+
+        def post(self, *a, **k):
+            raise Exception("connection refused")
+
+        def request(self, *a, **k):
+            raise Exception("connection refused")
+
+    client._session = DownSession()
+
+    assert client.fetch_authorized_associates() == {}       # fail-open
+    assert client.register_guide("G1", "57300", "Juan")     # no lanza

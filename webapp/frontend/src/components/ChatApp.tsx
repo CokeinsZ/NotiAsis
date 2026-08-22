@@ -1,7 +1,9 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { useRouter } from "next/navigation";
 import { getChats } from "@/lib/api";
+import { clearToken, getValidClaims } from "@/lib/auth";
 import type { ChatSummary } from "@/lib/types";
 import { parseUtc } from "@/lib/time";
 import ChatListItem from "./ChatListItem";
@@ -11,10 +13,31 @@ const LIST_POLL_MS = 15000;
 const TICK_MS = 30000; // re-render para actualizar los tiempos de gracia
 
 export default function ChatApp({ businessId }: { businessId: number }) {
+  const router = useRouter();
+  const [authorized, setAuthorized] = useState(false);
   const [chats, setChats] = useState<ChatSummary[]>([]);
   const [selectedPhone, setSelectedPhone] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [, setTick] = useState(0);
+
+  // Guard: sin JWT válido -> login; JWT de otro business -> su propio panel.
+  useEffect(() => {
+    const claims = getValidClaims();
+    if (!claims) {
+      router.replace("/login");
+      return;
+    }
+    if (claims.kind === "associate" && claims.business_id !== businessId) {
+      router.replace(claims.business_id ? `/chats/${claims.business_id}` : "/login");
+      return;
+    }
+    setAuthorized(true);
+  }, [businessId, router]);
+
+  function handleLogout() {
+    clearToken();
+    router.replace("/login");
+  }
 
   const refreshChats = useCallback(async () => {
     try {
@@ -26,6 +49,7 @@ export default function ChatApp({ businessId }: { businessId: number }) {
   }, [businessId]);
 
   useEffect(() => {
+    if (!authorized) return;
     refreshChats();
     const poll = setInterval(refreshChats, LIST_POLL_MS);
     const tick = setInterval(() => setTick((t) => t + 1), TICK_MS);
@@ -33,7 +57,7 @@ export default function ChatApp({ businessId }: { businessId: number }) {
       clearInterval(poll);
       clearInterval(tick);
     };
-  }, [refreshChats]);
+  }, [authorized, refreshChats]);
 
   // Orden: último mensaje DEL USUARIO más reciente primero; los chats sin
   // mensajes del usuario van al final (por última actividad).
@@ -58,13 +82,29 @@ export default function ChatApp({ businessId }: { businessId: number }) {
 
   const selectedChat = sortedChats.find((c) => c.user_id === selectedPhone) ?? null;
 
+  if (!authorized) {
+    return (
+      <main className="flex min-h-screen items-center justify-center bg-black">
+        <p className="text-sm text-neutral-500">Cargando...</p>
+      </main>
+    );
+  }
+
   return (
     <div className="flex h-screen bg-black">
       {/* Panel izquierdo: rectángulo vertical delgado con la lista de chats */}
       <aside className="flex w-80 shrink-0 flex-col border-r border-moon/35">
-        <header className="border-b border-moon/35 px-4 py-4">
-          <h1 className="text-lg font-semibold tracking-widest">NotiAsis</h1>
-          <p className="mt-0.5 text-xs text-moon/70">Conversaciones</p>
+        <header className="flex items-center justify-between border-b border-moon/35 px-4 py-4">
+          <div>
+            <h1 className="text-lg font-semibold tracking-widest">NotiAsis</h1>
+            <p className="mt-0.5 text-xs text-moon/70">Conversaciones</p>
+          </div>
+          <button
+            onClick={handleLogout}
+            className="text-xs text-neutral-500 transition-colors hover:text-moon"
+          >
+            Salir
+          </button>
         </header>
 
         <div className="flex-1 divide-y divide-moon/25 overflow-y-auto">

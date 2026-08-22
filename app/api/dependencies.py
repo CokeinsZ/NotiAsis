@@ -24,7 +24,11 @@ def get_settings() -> Settings:
 
 @lru_cache
 def get_backend_client() -> RustBackendClient:
-    return RustBackendClient(base_url=get_settings().backend_api_url)
+    settings = get_settings()
+    return RustBackendClient(
+        base_url=settings.backend_api_url,
+        api_key=settings.backend_api_key,
+    )
 
 
 @lru_cache

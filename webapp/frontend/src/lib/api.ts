@@ -1,21 +1,13 @@
-import type { Business, ChatSummary, Message } from "./types";
+import type { ChatSummary, Message } from "./types";
+import { clearToken, getToken, setToken } from "./auth";
 
 // En el navegador las llamadas pasan por el proxy /api/backend
-// (ver next.config.ts), así no hay CORS. En el servidor (SSR) se habla
-// directo con el backend porque no existe origen relativo.
+// (route handler en runtime). En el servidor (SSR) se habla directo
+// con el backend porque no existe origen relativo.
 const BASE =
   typeof window === "undefined"
     ? (process.env.BACKEND_URL ?? "http://localhost:3000")
     : "/api/backend";
-
-async function request<T>(path: string, init?: RequestInit): Promise<T> {
-  const response = await fetch(`${BASE}${path}`, init);
-  if (!response.ok) {
-    const body = await response.json().catch(() => ({}));
-    throw new ApiError(response.status, body.message ?? `Error ${response.status}`);
-  }
-  return response.json();
-}
 
 export class ApiError extends Error {
   constructor(
@@ -26,10 +18,61 @@ export class ApiError extends Error {
   }
 }
 
-export async function getBusinesses(): Promise<Business[]> {
-  const data = await request<{ businesses: Business[] }>("/businesses");
-  return data.businesses;
+function redirectToLogin(): void {
+  if (typeof window !== "undefined") {
+    clearToken();
+    window.location.href = "/login";
+  }
 }
+
+async function request<T>(path: string, init?: RequestInit): Promise<T> {
+  const token = getToken();
+  const headers = new Headers(init?.headers);
+  if (token) {
+    headers.set("Authorization", `Bearer ${token}`);
+  }
+
+  const response = await fetch(`${BASE}${path}`, { ...init, headers });
+
+  if (response.status === 401) {
+    redirectToLogin();
+    throw new ApiError(401, "Sesión expirada");
+  }
+
+  if (!response.ok) {
+    const body = await response.json().catch(() => ({}));
+    throw new ApiError(response.status, body.message ?? `Error ${response.status}`);
+  }
+  return response.json();
+}
+
+// ---------------- Auth ----------------
+
+export interface LoginResponse {
+  token: string;
+  expires_in: number;
+  business_id: number | null;
+  phone_number: string | null;
+}
+
+export async function login(username: string, password: string): Promise<LoginResponse> {
+  const response = await fetch(`${BASE}/auth/login`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ username, password }),
+  });
+
+  if (!response.ok) {
+    const body = await response.json().catch(() => ({}));
+    throw new ApiError(response.status, body.message ?? "Credenciales inválidas");
+  }
+
+  const data = (await response.json()) as LoginResponse & { message: string };
+  setToken(data.token);
+  return data;
+}
+
+// ---------------- Datos ----------------
 
 export async function getChats(businessId: number): Promise<ChatSummary[]> {
   const data = await request<{ chats: ChatSummary[] }>(`/chats?business_id=${businessId}`);
@@ -48,7 +91,7 @@ export async function sendChatMessage(
   userPhone: string,
   message: string,
 ): Promise<Message> {
-  const data = await request<{ data: Message }>(
+  const data = await request<{ data: Message; renewed_token: string | null }>(
     `/chats/${businessId}/${encodeURIComponent(userPhone)}/messages`,
     {
       method: "POST",
@@ -56,5 +99,11 @@ export async function sendChatMessage(
       body: JSON.stringify({ message }),
     },
   );
+
+  // Cada mensaje libre renueva la sesión por otros 15 minutos.
+  if (data.renewed_token) {
+    setToken(data.renewed_token);
+  }
+
   return data.data;
 }
