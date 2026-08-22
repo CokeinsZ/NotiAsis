@@ -36,11 +36,7 @@ impl ChatRepositoryTrait for PostgresChatRepository {
                 u.full_name AS user_full_name,
                 c.last_user_message,
                 c.last_user_message_timestamp,
-                (
-                    SELECT MAX(m.created_at)
-                    FROM messages m
-                    WHERE m.business_id = c.business_id AND m.user_id = c.user_id
-                ) AS last_activity
+                c.last_user_message_timestamp AS last_activity
             FROM chats c
             JOIN users u ON u.phone_number = c.user_id
             WHERE c.business_id = $1
