@@ -10,8 +10,10 @@ from functools import lru_cache
 from app.config import Settings
 from app.services.associate_directory import AssociateDirectory
 from app.services.backend_client import RustBackendClient
+from app.services.google_sheets import GoogleSheetClient
 from app.services.pdf_extractor import PdfTextExtractor
 from app.services.recipient_extractor import DeepSeekRecipientExtractor
+from app.services.sheet_notifier import SheetNotificationService
 from app.services.shipping_notifier import ShippingNotificationService
 from app.services.webhook_processor import WhatsAppWebhookProcessor
 from app.whatsapp.client import WhatsAppClient
@@ -38,6 +40,23 @@ def get_associate_directory() -> AssociateDirectory:
     return AssociateDirectory.load(
         backend=get_backend_client(),
         fallback_numbers=settings.allowed_sender_numbers,
+    )
+
+
+@lru_cache
+def get_sheet_notifier() -> SheetNotificationService:
+    settings = get_settings()
+    whatsapp_client = WhatsAppClient(
+        access_token=settings.whatsapp_token,
+        phone_number_id=settings.whatsapp_phone_id,
+    )
+    return SheetNotificationService(
+        sheet_source=GoogleSheetClient(),
+        backend=get_backend_client(),
+        message_sender=whatsapp_client,
+        media_uploader=whatsapp_client,
+        debug_notification_number=settings.debug_notification_number,
+        notification_override_number=settings.notification_override_number,
     )
 
 

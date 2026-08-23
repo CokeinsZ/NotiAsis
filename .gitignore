@@ -4,3 +4,4 @@ __pycache__
 webapp/backend/target
 webapp/frontend/node_modules
 webapp/frontend/.next
+*.sh

@@ -13,6 +13,9 @@ pub trait GuideServiceTrait: Send + Sync {
     /// guía ya existía y no se debe volver a notificar al usuario.
     async fn register_guide(&self, dto: RegisterGuideDto) -> Result<GuideRegistration, String>;
     async fn get_guides(&self, user_phone: Option<String>) -> Result<Vec<Guide>, String>;
+    /// Consulta una guía puntual (el bot la usa para decidir entre
+    /// notificación completa o recordatorio).
+    async fn get_guide(&self, number: &str) -> Result<Guide, String>;
     async fn mark_notified(&self, number: &str) -> Result<(), String>;
 }
 
@@ -53,6 +56,13 @@ impl GuideServiceTrait for GuideService {
 
     async fn get_guides(&self, user_phone: Option<String>) -> Result<Vec<Guide>, String> {
         self.guide_repository.get_guides(user_phone.as_deref()).await
+    }
+
+    async fn get_guide(&self, number: &str) -> Result<Guide, String> {
+        match self.guide_repository.get_guide_by_number(number).await? {
+            Some(guide) => Ok(guide),
+            None => Err("Guide not found".to_string()),
+        }
     }
 
     async fn mark_notified(&self, number: &str) -> Result<(), String> {

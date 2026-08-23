@@ -50,6 +50,26 @@ class TextExtractor(ABC):
         """Extrae el texto de un documento. Retorna "" si falla."""
 
 
+class SheetSource(ABC):
+    """Fuente de hojas de cálculo (Google Sheets) con usuarios a notificar."""
+
+    @abstractmethod
+    def fetch_sheet(self, document_id: str, sheet_gid: str):
+        """Descarga una hoja del documento y la retorna como DataFrame."""
+
+    @abstractmethod
+    def download_file(self, url: str) -> bytes | None:
+        """Descarga un archivo público (ej. el PDF de la guía)."""
+
+
+class MediaUploader(ABC):
+    """Subida de archivos multimedia al proveedor de mensajería."""
+
+    @abstractmethod
+    def upload_media(self, data: bytes, filename: str) -> str | None:
+        """Sube un archivo y retorna su media_id. None si falla."""
+
+
 class RecipientInfoExtractor(ABC):
     """Extracción de datos del destinatario a partir de texto plano."""
 
@@ -78,6 +98,15 @@ class NotificationBackend(ABC):
         Retorna True si la guía es nueva (hay que notificar) o si el
         backend no responde (fail-open); False si ya fue registrada.
         """
+
+    @abstractmethod
+    def get_guide(self, number: str) -> dict | None:
+        """Consulta una guía por número. None si no existe o el backend falla."""
+
+    @abstractmethod
+    def get_business_sheet(self, business_id: int) -> dict | None:
+        """Configuración del Google Sheet del business (document_id,
+        office_id, delivered_id). None si no existe o el backend falla."""
 
     @abstractmethod
     def mark_guide_notified(self, number: str) -> None:

@@ -1,10 +1,10 @@
 import requests
 
-from app.core.interfaces import MediaRepository, MessageSender
+from app.core.interfaces import MediaRepository, MediaUploader, MessageSender
 from app.whatsapp.templates.base import TemplateMessage
 
 
-class WhatsAppClient(MediaRepository, MessageSender):
+class WhatsAppClient(MediaRepository, MessageSender, MediaUploader):
     """Cliente de bajo nivel para la WhatsApp Cloud API (Graph API de Meta).
 
     Solo conoce HTTP y la API de Meta: descarga de multimedia y envío de
@@ -41,6 +41,25 @@ class WhatsAppClient(MediaRepository, MessageSender):
         if response.status_code == 200:
             return response.content
         print(f"Error downloading media: {response.text}")
+        return None
+
+    def upload_media(self, data: bytes, filename: str) -> str | None:
+        """Sube un archivo a Meta y retorna su media_id.
+
+        El media_id se usa luego en plantillas con documento y permite
+        visualizar el archivo desde la webapp.
+        """
+        url = f"{self.GRAPH_API_URL}/{self._phone_number_id}/media"
+        files = {"file": (filename, data, "application/pdf")}
+        form = {"messaging_product": "whatsapp", "type": "application/pdf"}
+        response = self._session.post(
+            url, files=files, data=form, timeout=self._timeout
+        )
+        if response.status_code == 200:
+            media_id = response.json().get("id")
+            print(f"Media uploaded successfully ({media_id})")
+            return media_id
+        print(f"Error uploading media: {response.text}")
         return None
 
     def send_template(self, to_number: str, template: TemplateMessage) -> str | None:

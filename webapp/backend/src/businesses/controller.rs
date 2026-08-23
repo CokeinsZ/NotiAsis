@@ -133,6 +133,27 @@ async fn get_all_associates(
     }
 }
 
+/// Configuración del Google Sheet de usuarios a notificar de un business.
+/// La consulta el bot para el endpoint de notificación masiva.
+async fn get_business_sheet(
+    State(state): State<BusinessState>,
+    Path(business_id): Path<i32>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    match state.business_service.get_business_sheet(business_id).await {
+        Ok(sheet) => json_response(
+            StatusCode::OK,
+            serde_json::json!({
+                "message": "Sheet config retrieved",
+                "sheet": sheet
+            }),
+        ),
+        Err(e) => {
+            let status = if e == "Sheet config not found for business" { StatusCode::NOT_FOUND } else { StatusCode::BAD_REQUEST };
+            json_response(status, serde_json::json!({ "message": e }))
+        }
+    }
+}
+
 /// Números con permiso de enviar guías. Lo consulta el bot de Python
 /// al iniciar para armar su lista en memoria.
 async fn get_associate_phones(
@@ -157,6 +178,7 @@ pub fn business_routes(state: BusinessState) -> Router {
     Router::new()
         .route("/", post(create_business).get(get_businesses))
         .route("/{id}", get(get_business))
+        .route("/{id}/sheet", get(get_business_sheet))
         .route("/{id}/associates", post(create_associate).get(get_associates))
         .with_state(state)
 }
