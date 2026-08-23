@@ -1,0 +1,27 @@
+@import "tailwindcss";
+
+@theme {
+  /* Azul claro de luna: líneas y acentos de toda la app */
+  --color-moon: #8fb8ff;
+  /* Azul noche: burbujas de mensajes propios */
+  --color-night: #16233d;
+  --font-sans: "Inter", ui-sans-serif, system-ui, sans-serif;
+}
+
+html,
+body {
+  background-color: #000;
+  color: #fff;
+}
+
+/* Scrollbar discreta sobre fondo negro */
+::-webkit-scrollbar {
+  width: 6px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: color-mix(in srgb, var(--color-moon) 30%, transparent);
+  border-radius: 3px;
+}

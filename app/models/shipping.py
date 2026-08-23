@@ -1,15 +1,24 @@
 from dataclasses import dataclass
 
+from app.core.phones import normalize_phone
+
 
 @dataclass(frozen=True)
 class RecipientInfo:
-    """Información del destinatario extraída de una guía de envío."""
+    """Información del destinatario extraída de una guía de envío.
+
+    El teléfono se guarda siempre normalizado (sin '+').
+    """
 
     name: str
     phone: str
     tracking_number: str = ""
     delivery_address: str = ""
     product: str = ""
+
+    def __post_init__(self) -> None:
+        # Invariante del modelo: el teléfono siempre queda normalizado.
+        object.__setattr__(self, "phone", normalize_phone(self.phone))
 
     @classmethod
     def from_dict(cls, data: dict) -> "RecipientInfo":

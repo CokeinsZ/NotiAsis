@@ -1,4 +1,5 @@
 from app.whatsapp.templates.base import TemplateMessage
-from app.whatsapp.templates.pedido_enviado import PedidoEnviadoTemplate
+from app.whatsapp.templates.guia import GuiaTemplate
+from app.whatsapp.templates.mensaje_guia import MensajeGuiaTemplate
 
-__all__ = ["TemplateMessage", "PedidoEnviadoTemplate"]
+__all__ = ["TemplateMessage", "GuiaTemplate", "MensajeGuiaTemplate"]
