@@ -477,3 +477,44 @@ def test_client_survives_backend_down():
 
     assert client.fetch_authorized_associates() == {}       # fail-open
     assert client.register_guide("G1", "57300", "Juan")     # no lanza
+
+
+# ------------------------------ Texto completo de plantillas ------------------------------
+
+
+def test_guia_template_full_text():
+    from app.whatsapp.templates.guia import GuiaTemplate
+
+    recipient = RecipientInfo(name="YEINER MARRUGO PÉREZ", phone="573001234567")
+    template = GuiaTemplate(recipient, "MEDIA1")
+
+    assert template.log_message() == "Guia de envio de tu pedido"
+    assert template.media_type() == "document"
+    assert template.log_media_id() == "MEDIA1"
+
+
+def test_mensaje_guia_template_full_text():
+    from app.whatsapp.templates.mensaje_guia import MensajeGuiaTemplate
+
+    recipient = RecipientInfo(
+        name="YEINER MARRUGO PÉREZ",
+        phone="573001234567",
+        tracking_number="240058393784",
+        delivery_address="OFICINA DE INTERRAPIDÍSIMO (CLL REAL DEL COCO SEC LA CRUZ) TURBANA\\BOLI\\COL",
+        product="Collar Girasol",
+    )
+    template = MensajeGuiaTemplate(recipient, "MEDIA1")
+
+    assert template.log_message() == (
+        "Es hora de recoger tu pedido\n"
+        "Hola YEINER MARRUGO PÉREZ,\n"
+        "\n"
+        "Tu pedido 240058393784 con el producto Collar Girasol, ya está listo "
+        "para recoger en OFICINA DE INTERRAPIDÍSIMO (CLL REAL DEL COCO SEC LA CRUZ) "
+        "TURBANA\\BOLI\\COL.\n"
+        "\n"
+        "Por favor reclamar lo antes posible para evitar devoluciones por parte "
+        "de la empresa transportadora.\n"
+        "\n"
+        "¡Disfruta!"
+    )

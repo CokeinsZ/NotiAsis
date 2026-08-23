@@ -86,6 +86,33 @@ export async function getChatMessages(businessId: number, userPhone: string): Pr
   return data.data;
 }
 
+/**
+ * Descarga multimedia a través del backend (que la obtiene de Meta en
+ * memoria, sin guardarla) y la devuelve como Blob para visualizarla o
+ * reproducirla localmente en el navegador.
+ */
+export async function fetchMediaBlob(mediaId: string): Promise<Blob> {
+  const token = getToken();
+  const headers = new Headers();
+  if (token) {
+    headers.set("Authorization", `Bearer ${token}`);
+  }
+
+  const response = await fetch(
+    `${BASE}/messages/media/${encodeURIComponent(mediaId)}`,
+    { headers },
+  );
+
+  if (response.status === 401) {
+    redirectToLogin();
+    throw new ApiError(401, "Sesión expirada");
+  }
+  if (!response.ok) {
+    throw new ApiError(response.status, "No se pudo cargar el archivo");
+  }
+  return response.blob();
+}
+
 export async function sendChatMessage(
   businessId: number,
   userPhone: string,

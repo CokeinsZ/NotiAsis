@@ -1,11 +1,14 @@
 use axum::{
     Json, Router,
+    body::Body,
     extract::{Path, State},
-    http::StatusCode,
-    routing::{patch, post},
+    http::{StatusCode, header},
+    response::{IntoResponse, Response},
+    routing::{get, patch, post},
 };
 use validator::Validate;
 
+use crate::auth::middleware::AuthenticatedClaims;
 use crate::messages::dtos::{IncomingMessageDto, OutgoingMessageDto, UpdateMessageStatusDto};
 use crate::state::MessageState;
 use crate::tools::responses::{build_validation_response, json_response};
@@ -84,10 +87,34 @@ async fn update_status(
     }
 }
 
+/// Descarga multimedia de Meta y la reenvía al navegador en memoria
+/// (Content-Disposition: inline para que se visualice/reproduzca en la
+/// página en vez de descargarse). Nada se guarda en el servidor.
+async fn get_media(
+    _claims: AuthenticatedClaims,
+    State(state): State<MessageState>,
+    Path(media_id): Path<String>,
+) -> Response<Body> {
+    match state.message_service.fetch_media(&media_id).await {
+        Ok((content_type, bytes)) => Response::builder()
+            .status(StatusCode::OK)
+            .header(header::CONTENT_TYPE, content_type)
+            .header(header::CONTENT_DISPOSITION, "inline")
+            .body(Body::from(bytes))
+            .unwrap(),
+        Err(e) => json_response(
+            StatusCode::BAD_GATEWAY,
+            serde_json::json!({ "message": e }),
+        )
+        .into_response(),
+    }
+}
+
 pub fn message_routes(state: MessageState) -> Router {
     Router::new()
         .route("/incoming", post(register_incoming))
         .route("/outgoing", post(register_outgoing))
+        .route("/media/{media_id}", get(get_media))
         .route("/{meta_message_id}/status", patch(update_status))
         .with_state(state)
 }
@@ -102,9 +129,48 @@ mod tests {
     use std::sync::Arc;
     use tower::ServiceExt;
 
+    use axum::middleware;
+
+    use crate::auth::dtos::{ApiKeyLoginDto, ChangePasswordDto, Claims, LoginDto, TokenResponse};
+    use crate::auth::service::AuthServiceTrait;
     use crate::messages::dtos::{MediaType, Message, MessageStatus, SendMessageDto};
     use crate::messages::service::MessageServiceTrait;
     use crate::state::AppState;
+
+    struct FakeAuthService;
+
+    #[async_trait::async_trait]
+    impl AuthServiceTrait for FakeAuthService {
+        async fn login(&self, _: LoginDto) -> Result<TokenResponse, String> {
+            unimplemented!()
+        }
+
+        async fn login_with_api_key(&self, _: ApiKeyLoginDto) -> Result<TokenResponse, String> {
+            unimplemented!()
+        }
+
+        async fn change_password(&self, _: i32, _: &str, _: ChangePasswordDto) -> Result<(), String> {
+            unimplemented!()
+        }
+
+        fn validate_token(&self, token: &str) -> Result<Claims, String> {
+            match token {
+                "valido" => Ok(Claims {
+                    sub: "stiven".into(),
+                    kind: "associate".into(),
+                    business_id: Some(1),
+                    phone_number: Some("573003579384".into()),
+                    iat: 0,
+                    exp: usize::MAX,
+                }),
+                _ => Err("invalid token".into()),
+            }
+        }
+
+        fn renew_token(&self, _: &Claims) -> Result<TokenResponse, String> {
+            unimplemented!()
+        }
+    }
 
     struct FakeMessageService;
 
@@ -151,13 +217,26 @@ mod tests {
         async fn update_status(&self, _: &str, _: MessageStatus) -> Result<(), String> {
             Ok(())
         }
+
+        async fn fetch_media(&self, media_id: &str) -> Result<(String, Vec<u8>), String> {
+            if media_id == "existe" {
+                Ok(("application/pdf".to_string(), b"%PDF-fake".to_vec()))
+            } else {
+                Err("media not found".to_string())
+            }
+        }
     }
 
     fn create_routes() -> Router {
+        let auth_service: Arc<dyn AuthServiceTrait> = Arc::new(FakeAuthService);
         message_routes(MessageState {
             message_service: Arc::new(FakeMessageService),
             global_state: Arc::new(AppState { }),
         })
+        .layer(middleware::from_fn_with_state(
+            auth_service,
+            crate::auth::middleware::require_auth,
+        ))
     }
 
     #[tokio::test]
@@ -176,6 +255,7 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .uri("/incoming")
+                    .header("Authorization", "Bearer valido")
                     .method("POST")
                     .header("Content-Type", "application/json")
                     .body(Body::from(serde_json::to_string(&payload).unwrap()))
@@ -204,6 +284,7 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .uri("/incoming")
+                    .header("Authorization", "Bearer valido")
                     .method("POST")
                     .header("Content-Type", "application/json")
                     .body(Body::from(serde_json::to_string(&payload).unwrap()))
@@ -223,6 +304,7 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .uri("/wamid.abc/status")
+                    .header("Authorization", "Bearer valido")
                     .method("PATCH")
                     .header("Content-Type", "application/json")
                     .body(Body::from(serde_json::to_string(&payload).unwrap()))
@@ -232,5 +314,60 @@ mod tests {
             .unwrap();
 
         assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn get_media_streams_bytes_with_content_type() {
+        let response = create_routes()
+            .oneshot(
+                Request::builder()
+                    .uri("/media/existe")
+                    .method("GET")
+                    .header("Authorization", "Bearer valido")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers()["content-type"], "application/pdf");
+        assert_eq!(response.headers()["content-disposition"], "inline");
+
+        let body_bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        assert_eq!(body_bytes.as_ref(), b"%PDF-fake");
+    }
+
+    #[tokio::test]
+    async fn get_media_failure_returns_502() {
+        let response = create_routes()
+            .oneshot(
+                Request::builder()
+                    .uri("/media/noexiste")
+                    .method("GET")
+                    .header("Authorization", "Bearer valido")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+    }
+
+    #[tokio::test]
+    async fn get_media_without_token_returns_401() {
+        let response = create_routes()
+            .oneshot(
+                Request::builder()
+                    .uri("/media/existe")
+                    .method("GET")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
     }
 }

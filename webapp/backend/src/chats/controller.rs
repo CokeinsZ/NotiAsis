@@ -185,6 +185,10 @@ mod tests {
         async fn update_status(&self, _: &str, _: MessageStatus) -> Result<(), String> {
             Ok(())
         }
+
+        async fn fetch_media(&self, _: &str) -> Result<(String, Vec<u8>), String> {
+            unimplemented!()
+        }
     }
 
     /// AuthService fake: acepta el token "valido" (business 7) y "otro" (business 9).

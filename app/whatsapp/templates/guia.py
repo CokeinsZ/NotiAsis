@@ -25,6 +25,10 @@ class GuiaTemplate(TemplateMessage):
     def log_media_id(self) -> str | None:
         return self._media_id
 
+    def log_message(self) -> str | None:
+        # Texto fijo de la plantilla tal como la renderiza Meta.
+        return "Guia de envio de tu pedido"
+
     def build_components(self) -> list[dict]:
         return [
             self._build_header(),

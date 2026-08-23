@@ -1,5 +1,6 @@
 import type { Message } from "@/lib/types";
 import { formatMessageTime } from "@/lib/time";
+import MediaAttachment from "./MediaAttachment";
 
 function StatusTicks({ status }: { status: Message["status"] }) {
   if (!status) return null;
@@ -14,24 +15,32 @@ function StatusTicks({ status }: { status: Message["status"] }) {
 }
 
 function MessageContent({ message }: { message: Message }) {
-  if (message.media_type === "document") {
+  // Con media adjunta: texto/caption + visor/reproductor en memoria
+  if (message.media_id) {
     return (
-      <span className="italic">
-        [Documento] {message.message ?? "Guía de envío"}
-      </span>
+      <>
+        {message.message && <span className="whitespace-pre-wrap">{message.message}</span>}
+        <div>
+          <MediaAttachment
+            mediaId={message.media_id}
+            mediaType={message.media_type}
+            caption={message.message}
+          />
+        </div>
+      </>
     );
+  }
+
+  if (message.media_type === "document") {
+    return <span className="italic">[Documento] {message.message ?? ""}</span>;
   }
   if (message.media_type === "audio") {
     return <span className="italic">[Audio]</span>;
   }
   if (message.media_type === "image") {
-    return (
-      <span className="italic">
-        [Imagen] {message.message ?? ""}
-      </span>
-    );
+    return <span className="italic">[Imagen] {message.message ?? ""}</span>;
   }
-  return <span>{message.message}</span>;
+  return <span className="whitespace-pre-wrap">{message.message}</span>;
 }
 
 export default function MessageBubble({ message }: { message: Message }) {

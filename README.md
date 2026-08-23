@@ -62,7 +62,10 @@ El bot consume la API del backend (`BACKEND_API_URL`):
   `POST /guides` decide si notificar (`created: false` = guía duplicada,
   no se vuelve a notificar). Tras enviar las plantillas registra cada
   mensaje con `POST /messages/outgoing` (crea el chat si no existe) y
-  marca la guía con `POST /guides/{number}/notified`.
+  marca la guía con `POST /guides/{number}/notified`. Cada plantilla
+  guarda en el historial su **texto completo renderizado** (el que Meta
+  muestra al cliente) — si una plantilla cambia en Meta Business,
+  actualiza su `log_message()` en `app/whatsapp/templates/`.
 - **Mensaje de un usuario final**: `POST /messages/incoming`.
 - **Estados que reporta Meta** (sent/delivered/read):
   `PATCH /messages/{meta_message_id}/status`.
@@ -171,6 +174,11 @@ acentos azul claro de luna:
   - Panel derecho: historial del chat con burbujas, estados
     (✓ / ✓✓ / ✓✓ azul) y envío de mensajes libres (deshabilitado cuando
     la ventana de 24h está cerrada; el backend responde 422).
+  - Multimedia (PDFs, imágenes, audios): se carga bajo demanda como
+    **blob en la memoria del navegador** — el backend hace de túnel hacia
+    Meta (`GET /messages/media/{id}`) sin guardar nada en disco, y el
+    navegador visualiza/reproduce el archivo (visor de PDF, `<img>`,
+    `<audio>`) liberando la memoria al salir del chat.
 
 ```bash
 cd webapp/frontend
@@ -215,6 +223,7 @@ Para la webapp:
 | GET | `/chats?business_id={id}` | Bandeja: último mensaje + `window_open` |
 | GET | `/chats/{business_id}/{user_phone}/messages` | Historial del chat |
 | POST | `/chats/{business_id}/{user_phone}/messages` | Enviar mensaje libre (422 si la ventana de 24h está cerrada) |
+| GET | `/messages/media/{media_id}` | Multimedia de Meta en memoria (túnel, sin tocar disco) con `Content-Disposition: inline` para visualizar en el navegador |
 | GET | `/guides?user_phone=` | Guías registradas |
 
 Para el bot (Python):

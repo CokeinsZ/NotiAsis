@@ -3,12 +3,17 @@ use async_trait::async_trait;
 pub const GRAPH_API_URL: &str = "https://graph.facebook.com/v19.0";
 
 /// Cliente de la WhatsApp Cloud API de Meta para los envíos que hace el
-/// backend (mensajes libres desde la webapp).
+/// backend (mensajes libres desde la webapp) y la descarga de multimedia.
 #[async_trait]
 pub trait MetaClientTrait: Send + Sync {
     /// Envía un mensaje de texto libre. Retorna el meta_message_id
     /// asignado por Meta.
     async fn send_text_message(&self, to_number: &str, text: &str) -> Result<String, String>;
+
+    /// Descarga un archivo multimedia de Meta en memoria.
+    /// Retorna (content_type, bytes). Nada se escribe a disco: el archivo
+    /// solo pasa por memoria volátil camino al navegador.
+    async fn fetch_media(&self, media_id: &str) -> Result<(String, Vec<u8>), String>;
 }
 
 pub struct MetaClient {
@@ -66,6 +71,51 @@ impl MetaClientTrait for MetaClient {
             .as_str()
             .map(|id| id.to_string())
             .ok_or_else(|| format!("Meta response without message id: {body}"))
+    }
+
+    async fn fetch_media(&self, media_id: &str) -> Result<(String, Vec<u8>), String> {
+        // 1. Obtener la URL temporal de descarga
+        let url = format!("{}/{}", self.graph_api_url, media_id);
+        let response = self.http
+            .get(&url)
+            .bearer_auth(&self.access_token)
+            .send()
+            .await
+            .map_err(|e| e.to_string())?;
+
+        if !response.status().is_success() {
+            let body = response.text().await.unwrap_or_default();
+            return Err(format!("Error getting media URL from Meta: {body}"));
+        }
+
+        let body: serde_json::Value = response.json().await.map_err(|e| e.to_string())?;
+        let media_url = body["url"]
+            .as_str()
+            .ok_or_else(|| format!("Meta response without media url: {body}"))?
+            .to_string();
+
+        // 2. Descargar el contenido (en memoria, sin tocar disco)
+        let response = self.http
+            .get(&media_url)
+            .bearer_auth(&self.access_token)
+            .send()
+            .await
+            .map_err(|e| e.to_string())?;
+
+        if !response.status().is_success() {
+            let body = response.text().await.unwrap_or_default();
+            return Err(format!("Error downloading media from Meta: {body}"));
+        }
+
+        let content_type = response
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or("application/octet-stream")
+            .to_string();
+
+        let bytes = response.bytes().await.map_err(|e| e.to_string())?;
+        Ok((content_type, bytes.to_vec()))
     }
 }
 

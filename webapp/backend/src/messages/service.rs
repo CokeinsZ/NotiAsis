@@ -46,6 +46,9 @@ pub trait MessageServiceTrait: Send + Sync {
     async fn register_incoming(&self, dto: IncomingMessageDto) -> Result<Message, String>;
     async fn register_outgoing(&self, dto: OutgoingMessageDto) -> Result<Message, String>;
     async fn update_status(&self, meta_message_id: &str, status: MessageStatus) -> Result<(), String>;
+    /// Descarga multimedia de Meta en memoria (sin tocar disco) para
+    /// visualizarla/reproducirla en el navegador.
+    async fn fetch_media(&self, media_id: &str) -> Result<(String, Vec<u8>), String>;
 }
 
 pub struct MessageService {
@@ -187,6 +190,10 @@ impl MessageServiceTrait for MessageService {
 
         Ok(())
     }
+
+    async fn fetch_media(&self, media_id: &str) -> Result<(String, Vec<u8>), String> {
+        self.meta_client.fetch_media(media_id).await
+    }
 }
 
 #[cfg(test)]
@@ -326,6 +333,10 @@ mod tests {
         async fn send_text_message(&self, to_number: &str, text: &str) -> Result<String, String> {
             self.sent.lock().unwrap().push((to_number.to_string(), text.to_string()));
             Ok("wamid.fake".to_string())
+        }
+
+        async fn fetch_media(&self, _: &str) -> Result<(String, Vec<u8>), String> {
+            Ok(("application/pdf".to_string(), b"%PDF-fake".to_vec()))
         }
     }
 

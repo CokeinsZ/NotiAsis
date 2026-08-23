@@ -21,10 +21,20 @@ class MensajeGuiaTemplate(TemplateMessage):
         return self.TEMPLATE_NAME
 
     def log_message(self) -> str | None:
+        # Texto completo de la plantilla tal como la renderiza Meta.
+        # Si la plantilla cambia en Meta Business, actualizar aquí.
         return (
-            f"Hola {self._recipient.name}, tu pedido ({self._recipient.product}) "
-            f"va en camino. Guía: {self._recipient.tracking_number}. "
-            f"Dirección: {self._recipient.delivery_address}"
+            "Es hora de recoger tu pedido\n"
+            f"Hola {self._recipient.name},\n"
+            "\n"
+            f"Tu pedido {self._recipient.tracking_number} con el producto "
+            f"{self._recipient.product}, ya está listo para recoger en "
+            f"{self._recipient.delivery_address}.\n"
+            "\n"
+            "Por favor reclamar lo antes posible para evitar devoluciones "
+            "por parte de la empresa transportadora.\n"
+            "\n"
+            "¡Disfruta!"
         )
 
     def build_components(self) -> list[dict]:
