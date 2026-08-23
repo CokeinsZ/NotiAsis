@@ -2,7 +2,7 @@ use axum::{
     Json, Router,
     extract::{Path, Query, State},
     http::StatusCode,
-    routing::post,
+    routing::{get, post},
 };
 use validator::Validate;
 
@@ -62,6 +62,26 @@ async fn get_guides(
     }
 }
 
+/// Consulta una guía puntual por su número.
+async fn get_guide(
+    State(state): State<GuideState>,
+    Path(number): Path<String>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    match state.guide_service.get_guide(&number).await {
+        Ok(guide) => json_response(
+            StatusCode::OK,
+            serde_json::json!({
+                "message": "Guide retrieved",
+                "guide": guide
+            }),
+        ),
+        Err(e) => {
+            let status = if e == "Guide not found" { StatusCode::NOT_FOUND } else { StatusCode::BAD_REQUEST };
+            json_response(status, serde_json::json!({ "message": e }))
+        }
+    }
+}
+
 /// El bot marca la guía como notificada tras enviar las plantillas.
 async fn mark_guide_notified(
     State(state): State<GuideState>,
@@ -84,6 +104,7 @@ async fn mark_guide_notified(
 pub fn guide_routes(state: GuideState) -> Router {
     Router::new()
         .route("/", post(register_guide).get(get_guides))
+        .route("/{number}", get(get_guide))
         .route("/{number}/notified", post(mark_guide_notified))
         .with_state(state)
 }

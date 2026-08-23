@@ -44,9 +44,12 @@ app/
 │   ├── shipping_notifier.py # Orquestador del flujo de notificación
 │   ├── webhook_processor.py # Interpreta los eventos del webhook de Meta
 │   ├── backend_client.py    # Cliente HTTP del backend Rust (NotificationBackend)
+│   ├── google_sheets.py     # Descarga de hojas de Google Sheets (polars)
+│   ├── sheet_notifier.py    # Notificación masiva desde el Google Sheet
 │   └── associate_directory.py  # Asociados autorizados en RAM (cargados del backend)
 └── api/
     ├── dependencies.py      # Composition root (inyección de dependencias)
+    ├── notify_sheet.py      # POST /notify-sheet (notificación masiva)
     └── webhook.py           # Router FastAPI (GET/POST /webhook)
 tests/                       # Tests del bot (pytest, sin servicios externos)
 ```
@@ -71,7 +74,28 @@ El bot consume la API del backend (`BACKEND_API_URL`):
   `PATCH /messages/{meta_message_id}/status`.
 
 Todos los teléfonos se normalizan sin '+' en ambos servicios antes de
-guardarse o compararse.
+guardarse o compararse (los números de 10 dígitos, como los del Google
+Sheet, reciben el prefijo 57).
+
+### Notificación masiva desde Google Sheet
+
+`POST /notify-sheet` con `{"business_id": N}` (responde 202 y procesa en
+segundo plano). El bot lee la configuración del sheet del business desde
+el backend (`GET /businesses/{id}/sheet` → `business_users_sheet`):
+
+1. Descarga las hojas `office_id` (todos los pedidos) y `delivered_id`
+   (pedidos ya reclamados) como CSV con polars.
+2. Anti-join por `numero_guia`: quedan solo las guías **no reclamadas**.
+   Las filas sin `numero_guia` se omiten.
+3. Por cada guía pendiente (sin llamar a DeepSeek: la hoja ya trae
+   `NOMBRE`, `TELEFONO`, `DIRECCION`, `CIUDAD`, `DEPARTAMENTO`,
+   `PRODUCTO`):
+   - Si la guía ya fue notificada antes (`GET /guides/{number}`) →
+     plantilla **recordatorio**.
+   - Si nunca fue notificada → descarga el PDF de la columna
+     `Guia pdf`, lo sube a Meta (`POST /{phone_id}/media`) y envía las
+     plantillas **guia** + **mensaje_guia_es**, registra la guía y los
+     mensajes en el chat.
 
 ## Agregar una nueva plantilla de WhatsApp
 
@@ -225,6 +249,8 @@ Para la webapp:
 | POST | `/chats/{business_id}/{user_phone}/messages` | Enviar mensaje libre (422 si la ventana de 24h está cerrada) |
 | GET | `/messages/media/{media_id}` | Multimedia de Meta en memoria (túnel, sin tocar disco) con `Content-Disposition: inline` para visualizar en el navegador |
 | GET | `/guides?user_phone=` | Guías registradas |
+| GET | `/guides/{number}` | Una guía puntual (404 si no existe) |
+| GET | `/businesses/{id}/sheet` | Config del Google Sheet del business |
 
 Para el bot (Python):
 

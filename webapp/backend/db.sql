@@ -53,6 +53,18 @@ CREATE TABLE IF NOT EXISTS business_associates (
 		ON UPDATE CASCADE
 );
 
+CREATE TABLE IF NOT EXISTS business_users_sheet (
+	id SERIAL PRIMARY KEY,
+	business_id INT NOT NULL,
+	document_id VARCHAR(64) NOT NULL,
+	office_id VARCHAR(12),
+	delivered_id VARCHAR(12),
+
+	FOREIGN KEY (business_id) REFERENCES businesses(id)
+		ON DELETE CASCADE
+		ON UPDATE CASCADE
+);
+
 CREATE TABLE IF NOT EXISTS chats (
 	business_id INT NOT NULL,
 	user_id VARCHAR(20) NOT NULL,

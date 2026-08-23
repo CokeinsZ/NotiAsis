@@ -2,7 +2,9 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 
-use crate::businesses::dtos::{Business, BusinessAssociate, CreateAssociateDto, CreateBusinessDto};
+use crate::businesses::dtos::{
+    Business, BusinessAssociate, BusinessUsersSheet, CreateAssociateDto, CreateBusinessDto,
+};
 use crate::businesses::repository::BusinessRepositoryTrait;
 use crate::tools::phones::normalize_phone;
 
@@ -11,6 +13,7 @@ pub trait BusinessServiceTrait: Send + Sync {
     async fn create_business(&self, dto: CreateBusinessDto) -> Result<Business, String>;
     async fn get_businesses(&self) -> Result<Vec<Business>, String>;
     async fn get_business(&self, id: i32) -> Result<Business, String>;
+    async fn get_business_sheet(&self, business_id: i32) -> Result<BusinessUsersSheet, String>;
     async fn create_associate(&self, business_id: i32, dto: CreateAssociateDto) -> Result<BusinessAssociate, String>;
     async fn get_associates(&self, business_id: i32) -> Result<Vec<BusinessAssociate>, String>;
     async fn get_all_associates(&self) -> Result<Vec<BusinessAssociate>, String>;
@@ -41,6 +44,13 @@ impl BusinessServiceTrait for BusinessService {
         match self.repository.get_business_by_id(id).await? {
             Some(business) => Ok(business),
             None => Err("Business not found".to_string()),
+        }
+    }
+
+    async fn get_business_sheet(&self, business_id: i32) -> Result<BusinessUsersSheet, String> {
+        match self.repository.get_sheet_by_business(business_id).await? {
+            Some(sheet) => Ok(sheet),
+            None => Err("Sheet config not found for business".to_string()),
         }
     }
 
@@ -119,6 +129,10 @@ mod tests {
 
         async fn get_business_by_id(&self, id: i32) -> Result<Option<Business>, String> {
             Ok(self.businesses.lock().unwrap().iter().find(|b| b.id == id).cloned())
+        }
+
+        async fn get_sheet_by_business(&self, _: i32) -> Result<Option<BusinessUsersSheet>, String> {
+            Ok(None)
         }
 
         async fn save_associate(&self, business_id: i32, dto: &CreateAssociateDto, password_hash: &str) -> Result<BusinessAssociate, String> {

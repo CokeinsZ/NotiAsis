@@ -46,6 +46,17 @@ pub struct CreateBusinessDto {
     pub name: String,
 }
 
+/// Configuración del Google Sheet de usuarios a notificar de un business.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(sqlx::FromRow)]
+pub struct BusinessUsersSheet {
+    pub id: i32,
+    pub business_id: i32,
+    pub document_id: String,
+    pub office_id: Option<String>,
+    pub delivered_id: Option<String>,
+}
+
 #[derive(Debug, Serialize, Deserialize, Validate)]
 pub struct CreateAssociateDto {
     #[validate(regex(path = *PHONE_REGEX, message = "El teléfono debe tener entre 10 y 15 dígitos, con '+' opcional"))]

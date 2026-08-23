@@ -1,12 +1,15 @@
 use async_trait::async_trait;
 
-use crate::businesses::dtos::{Business, BusinessAssociate, CreateAssociateDto, CreateBusinessDto};
+use crate::businesses::dtos::{
+    Business, BusinessAssociate, BusinessUsersSheet, CreateAssociateDto, CreateBusinessDto,
+};
 
 #[async_trait]
 pub trait BusinessRepositoryTrait: Send + Sync {
     async fn save_business(&self, dto: &CreateBusinessDto) -> Result<Business, String>;
     async fn get_businesses(&self) -> Result<Vec<Business>, String>;
     async fn get_business_by_id(&self, id: i32) -> Result<Option<Business>, String>;
+    async fn get_sheet_by_business(&self, business_id: i32) -> Result<Option<BusinessUsersSheet>, String>;
     async fn save_associate(&self, business_id: i32, dto: &CreateAssociateDto, password_hash: &str) -> Result<BusinessAssociate, String>;
     async fn get_associates_by_business(&self, business_id: i32) -> Result<Vec<BusinessAssociate>, String>;
     /// Todos los asociados de empresas activas (lo consulta el bot al iniciar).
@@ -63,6 +66,19 @@ impl BusinessRepositoryTrait for PostgresBusinessRepository {
 
         sqlx::query_as::<_, Business>(query)
             .bind(id)
+            .fetch_optional(&self.db_pool)
+            .await
+            .map_err(|e| e.to_string())
+    }
+
+    async fn get_sheet_by_business(&self, business_id: i32) -> Result<Option<BusinessUsersSheet>, String> {
+        let query = r#"
+            SELECT id, business_id, document_id, office_id, delivered_id
+            FROM business_users_sheet WHERE business_id = $1
+        "#;
+
+        sqlx::query_as::<_, BusinessUsersSheet>(query)
+            .bind(business_id)
             .fetch_optional(&self.db_pool)
             .await
             .map_err(|e| e.to_string())

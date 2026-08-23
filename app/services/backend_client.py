@@ -92,6 +92,29 @@ class RustBackendClient(NotificationBackend):
             print(f"Error registering guide {number} in backend: {e}")
             return True  # fail-open: mejor notificar duplicado que perder la notificación
 
+    def get_guide(self, number: str) -> dict | None:
+        try:
+            response = self._request("GET", f"/guides/{number}")
+            if response.status_code == 404:
+                return None
+            response.raise_for_status()
+            return response.json().get("guide")
+        except Exception as e:
+            print(f"Error fetching guide {number} from backend: {e}")
+            return None
+
+    def get_business_sheet(self, business_id: int) -> dict | None:
+        try:
+            response = self._request("GET", f"/businesses/{business_id}/sheet")
+            if response.status_code == 404:
+                print(f"Business {business_id} has no sheet config.")
+                return None
+            response.raise_for_status()
+            return response.json().get("sheet")
+        except Exception as e:
+            print(f"Error fetching sheet config for business {business_id}: {e}")
+            return None
+
     def mark_guide_notified(self, number: str) -> None:
         try:
             response = self._request("POST", f"/guides/{number}/notified")
