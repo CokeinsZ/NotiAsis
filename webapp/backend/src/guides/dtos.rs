@@ -16,6 +16,7 @@ pub struct Guide {
     pub number: String,
     pub user_id: String,
     pub last_notification_timestamp: Option<NaiveDateTime>,
+    pub notification_count: i32,
 }
 
 /// El bot registra aquí cada guía recibida. Si el número de guía ya

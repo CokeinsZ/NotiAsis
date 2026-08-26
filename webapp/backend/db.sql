@@ -71,6 +71,9 @@ CREATE TABLE IF NOT EXISTS chats (
 	last_user_message_timestamp TIMESTAMP,
 	last_user_message TEXT,
 
+	is_important BOOLEAN NOT NULL DEFAULT FALSE,
+	last_guide_notification_at TIMESTAMP,
+
 	PRIMARY KEY (business_id, user_id),
 
 	FOREIGN KEY (business_id) REFERENCES businesses(id) 
@@ -105,6 +108,7 @@ CREATE TABLE IF NOT EXISTS guides (
 	number VARCHAR(20) PRIMARY KEY,
 	user_id VARCHAR(20) NOT NULL,
 	last_notification_timestamp TIMESTAMP,
+	notification_count INT NOT NULL DEFAULT 0,
 
 	FOREIGN KEY (user_id) REFERENCES users(phone_number) 
 		ON DELETE CASCADE

@@ -10,6 +10,8 @@ pub struct Chat {
     pub user_id: String,
     pub last_user_message_timestamp: Option<NaiveDateTime>,
     pub last_user_message: Option<String>,
+    pub is_important: bool,
+    pub last_guide_notification_at: Option<NaiveDateTime>,
 }
 
 /// Chat enriquecido para la bandeja de entrada de la webapp.
@@ -23,6 +25,9 @@ pub struct ChatSummary {
     pub last_user_message_timestamp: Option<NaiveDateTime>,
     /// Última actividad del chat (mensaje de cualquiera de las dos partes).
     pub last_activity: Option<NaiveDateTime>,
+    pub is_important: bool,
+    /// Última guía notificada en este chat.
+    pub last_guide_notification_at: Option<NaiveDateTime>,
     /// Si la ventana de 24h de Meta está abierta (calculado en el servicio,
     /// no viene de la base de datos).
     #[sqlx(skip)]
@@ -33,4 +38,9 @@ pub struct ChatSummary {
 pub struct ChatFilters {
     #[validate(range(min = 1, message = "El business_id debe ser positivo"))]
     pub business_id: i32,
+}
+
+#[derive(Debug, Serialize, Deserialize, Validate)]
+pub struct SetImportanceDto {
+    pub is_important: bool,
 }

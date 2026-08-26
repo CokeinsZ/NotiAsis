@@ -14,6 +14,11 @@ pub trait ChatRepositoryTrait: Send + Sync {
     /// Business del chat más reciente de un usuario (para mensajes
     /// entrantes que no especifican business).
     async fn find_latest_chat_business(&self, user_id: &str) -> Result<Option<i32>, String>;
+    /// Marca/desmarca un chat como importante. Retorna false si no existe.
+    async fn set_importance(&self, business_id: i32, user_id: &str, is_important: bool) -> Result<bool, String>;
+    /// Actualiza la fecha de última notificación de guía en todos los
+    /// chats del usuario (un usuario puede tener chat con varios business).
+    async fn touch_guide_notification(&self, user_id: &str, timestamp: NaiveDateTime) -> Result<u64, String>;
 }
 
 pub struct PostgresChatRepository {
@@ -29,6 +34,8 @@ impl PostgresChatRepository {
 #[async_trait]
 impl ChatRepositoryTrait for PostgresChatRepository {
     async fn get_chats_by_business(&self, business_id: i32) -> Result<Vec<ChatSummary>, String> {
+        // Orden de la bandeja: 1) importantes, 2) respuesta del usuario más
+        // reciente, 3) guía notificada más recientemente.
         let query = r#"
             SELECT
                 c.business_id,
@@ -36,11 +43,20 @@ impl ChatRepositoryTrait for PostgresChatRepository {
                 u.full_name AS user_full_name,
                 c.last_user_message,
                 c.last_user_message_timestamp,
-                c.last_user_message_timestamp AS last_activity
+                (
+                    SELECT MAX(m.created_at)
+                    FROM messages m
+                    WHERE m.business_id = c.business_id AND m.user_id = c.user_id
+                ) AS last_activity,
+                c.is_important,
+                c.last_guide_notification_at
             FROM chats c
             JOIN users u ON u.phone_number = c.user_id
             WHERE c.business_id = $1
-            ORDER BY last_activity DESC NULLS LAST
+            ORDER BY
+                c.is_important DESC,
+                c.last_user_message_timestamp DESC NULLS LAST,
+                c.last_guide_notification_at DESC NULLS LAST
         "#;
 
         sqlx::query_as::<_, ChatSummary>(query)
@@ -52,7 +68,8 @@ impl ChatRepositoryTrait for PostgresChatRepository {
 
     async fn get_chat(&self, business_id: i32, user_id: &str) -> Result<Option<Chat>, String> {
         let query = r#"
-            SELECT business_id, user_id, last_user_message_timestamp, last_user_message
+            SELECT business_id, user_id, last_user_message_timestamp, last_user_message,
+                   is_important, last_guide_notification_at
             FROM chats WHERE business_id = $1 AND user_id = $2
         "#;
 
@@ -100,6 +117,39 @@ impl ChatRepositoryTrait for PostgresChatRepository {
             .map_err(|e| e.to_string())?;
 
         Ok(())
+    }
+
+    async fn set_importance(&self, business_id: i32, user_id: &str, is_important: bool) -> Result<bool, String> {
+        let query = r#"
+            UPDATE chats SET is_important = $3
+            WHERE business_id = $1 AND user_id = $2
+        "#;
+
+        let result = sqlx::query(query)
+            .bind(business_id)
+            .bind(user_id)
+            .bind(is_important)
+            .execute(&self.db_pool)
+            .await
+            .map_err(|e| e.to_string())?;
+
+        Ok(result.rows_affected() > 0)
+    }
+
+    async fn touch_guide_notification(&self, user_id: &str, timestamp: NaiveDateTime) -> Result<u64, String> {
+        let query = r#"
+            UPDATE chats SET last_guide_notification_at = $2::timestamp
+            WHERE user_id = $1
+        "#;
+
+        let result = sqlx::query(query)
+            .bind(user_id)
+            .bind(timestamp)
+            .execute(&self.db_pool)
+            .await
+            .map_err(|e| e.to_string())?;
+
+        Ok(result.rows_affected())
     }
 
     async fn find_latest_chat_business(&self, user_id: &str) -> Result<Option<i32>, String> {

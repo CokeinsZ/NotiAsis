@@ -14,6 +14,12 @@ body {
   color: #fff;
 }
 
+/* Icono de importancia: admiración con solo contorno (no importante) */
+.icon-outline {
+  color: transparent;
+  -webkit-text-stroke: 1.2px var(--color-moon);
+}
+
 /* Scrollbar discreta sobre fondo negro */
 ::-webkit-scrollbar {
   width: 6px;

@@ -284,6 +284,8 @@ mod tests {
                     user_id: user_id.to_string(),
                     last_user_message_timestamp: None,
                     last_user_message: None,
+                    is_important: false,
+                    last_guide_notification_at: None,
                 });
             }
             Ok(())
@@ -304,6 +306,14 @@ mod tests {
             Ok(self.chats.lock().unwrap().iter()
                 .find(|c| c.user_id == user_id)
                 .map(|c| c.business_id))
+        }
+
+        async fn set_importance(&self, _: i32, _: &str, _: bool) -> Result<bool, String> {
+            Ok(true)
+        }
+
+        async fn touch_guide_notification(&self, _: &str, _: NaiveDateTime) -> Result<u64, String> {
+            Ok(1)
         }
     }
 
@@ -392,7 +402,7 @@ mod tests {
     #[tokio::test]
     async fn send_free_message_with_closed_window_fails() {
         let old = chrono::Utc::now().naive_utc() - Duration::hours(30);
-        let chats = vec![Chat { business_id: 1, user_id: "573003579384".into(), last_user_message_timestamp: Some(old), last_user_message: None }];
+        let chats = vec![Chat { business_id: 1, user_id: "573003579384".into(), last_user_message_timestamp: Some(old), last_user_message: None, is_important: false, last_guide_notification_at: None }];
         let (service, _, _, meta) = build_service(chats);
 
         let result = service.send_free_message(1, "573003579384", SendMessageDto { message: "Hola".into() }).await;
@@ -403,7 +413,7 @@ mod tests {
     #[tokio::test]
     async fn send_free_message_with_open_window_sends_and_persists() {
         let recent = chrono::Utc::now().naive_utc() - Duration::hours(1);
-        let chats = vec![Chat { business_id: 1, user_id: "573003579384".into(), last_user_message_timestamp: Some(recent), last_user_message: None }];
+        let chats = vec![Chat { business_id: 1, user_id: "573003579384".into(), last_user_message_timestamp: Some(recent), last_user_message: None, is_important: false, last_guide_notification_at: None }];
         let (service, message_repo, _, meta) = build_service(chats);
 
         let message = service.send_free_message(1, "573003579384", SendMessageDto { message: "Hola!".into() }).await.unwrap();
@@ -477,7 +487,7 @@ mod tests {
 
     #[tokio::test]
     async fn incoming_without_business_uses_existing_chat_business() {
-        let chats = vec![Chat { business_id: 9, user_id: "573003579384".into(), last_user_message_timestamp: None, last_user_message: None }];
+        let chats = vec![Chat { business_id: 9, user_id: "573003579384".into(), last_user_message_timestamp: None, last_user_message: None, is_important: false, last_guide_notification_at: None }];
         let (service, message_repo, _, _) = build_service(chats);
 
         let dto = IncomingMessageDto {

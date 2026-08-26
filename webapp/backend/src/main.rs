@@ -40,11 +40,15 @@ fn build_app(pool: sqlx::PgPool, meta_client: Arc<dyn MetaClientTrait>, jwt_secr
     let chat_service = Arc::new(chats::service::ChatService::new(chat_repository.clone()));
     let message_service = Arc::new(messages::service::MessageService::new(
         message_repository,
-        chat_repository,
+        chat_repository.clone(),
         user_repository.clone(),
         meta_client,
     ));
-    let guide_service = Arc::new(guides::service::GuideService::new(guide_repository, user_repository));
+    let guide_service = Arc::new(guides::service::GuideService::new(
+        guide_repository,
+        user_repository,
+        chat_repository.clone(),
+    ));
 
     // Estados por módulo
     let auth_state = AuthState {

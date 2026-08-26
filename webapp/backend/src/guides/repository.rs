@@ -31,7 +31,7 @@ impl GuideRepositoryTrait for PostgresGuideRepository {
             INSERT INTO guides (number, user_id)
             VALUES ($1, $2)
             ON CONFLICT (number) DO NOTHING
-            RETURNING number, user_id, last_notification_timestamp
+            RETURNING number, user_id, last_notification_timestamp, notification_count
         "#;
 
         sqlx::query_as::<_, Guide>(query)
@@ -44,7 +44,7 @@ impl GuideRepositoryTrait for PostgresGuideRepository {
 
     async fn get_guide_by_number(&self, number: &str) -> Result<Option<Guide>, String> {
         let query = r#"
-            SELECT number, user_id, last_notification_timestamp
+            SELECT number, user_id, last_notification_timestamp, notification_count
             FROM guides WHERE number = $1
         "#;
 
@@ -57,7 +57,7 @@ impl GuideRepositoryTrait for PostgresGuideRepository {
 
     async fn get_guides(&self, user_phone: Option<&str>) -> Result<Vec<Guide>, String> {
         let mut query = sqlx::QueryBuilder::new(
-            "SELECT number, user_id, last_notification_timestamp FROM guides WHERE 1=1"
+            "SELECT number, user_id, last_notification_timestamp, notification_count FROM guides WHERE 1=1"
         );
 
         if let Some(phone) = user_phone {
@@ -75,7 +75,10 @@ impl GuideRepositoryTrait for PostgresGuideRepository {
 
     async fn mark_notified(&self, number: &str, timestamp: NaiveDateTime) -> Result<bool, String> {
         let query = r#"
-            UPDATE guides SET last_notification_timestamp = $2::timestamp WHERE number = $1
+            UPDATE guides
+            SET last_notification_timestamp = $2::timestamp,
+                notification_count = notification_count + 1
+            WHERE number = $1
         "#;
 
         let result = sqlx::query(query)

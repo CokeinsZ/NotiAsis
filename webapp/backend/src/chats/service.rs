@@ -9,6 +9,8 @@ use crate::messages::service::is_window_open_at;
 #[async_trait]
 pub trait ChatServiceTrait: Send + Sync {
     async fn get_chats(&self, business_id: i32) -> Result<Vec<ChatSummary>, String>;
+    /// Marca/desmarca un chat como importante.
+    async fn set_chat_importance(&self, business_id: i32, user_phone: &str, is_important: bool) -> Result<(), String>;
 }
 
 pub struct ChatService {
@@ -32,6 +34,17 @@ impl ChatServiceTrait for ChatService {
         }
 
         Ok(chats)
+    }
+
+    async fn set_chat_importance(&self, business_id: i32, user_phone: &str, is_important: bool) -> Result<(), String> {
+        let updated = self.repository
+            .set_importance(business_id, &crate::tools::phones::normalize_phone(user_phone), is_important)
+            .await?;
+
+        if !updated {
+            return Err("Chat not found".to_string());
+        }
+        Ok(())
     }
 }
 
@@ -57,6 +70,8 @@ mod tests {
                     last_user_message: c.last_user_message.clone(),
                     last_user_message_timestamp: c.last_user_message_timestamp,
                     last_activity: c.last_user_message_timestamp,
+                    is_important: c.is_important,
+                    last_guide_notification_at: c.last_guide_notification_at,
                     window_open: false,
                 })
                 .collect())
@@ -79,6 +94,43 @@ mod tests {
         async fn find_latest_chat_business(&self, _: &str) -> Result<Option<i32>, String> {
             Ok(None)
         }
+
+        async fn set_importance(&self, business_id: i32, user_id: &str, is_important: bool) -> Result<bool, String> {
+            let mut chats = self.chats.lock().unwrap();
+            match chats.iter_mut().find(|c| c.business_id == business_id && c.user_id == user_id) {
+                Some(chat) => {
+                    chat.is_important = is_important;
+                    Ok(true)
+                }
+                None => Ok(false),
+            }
+        }
+
+        async fn touch_guide_notification(&self, _: &str, _: chrono::NaiveDateTime) -> Result<u64, String> {
+            Ok(1)
+        }
+    }
+
+    #[tokio::test]
+    async fn set_importance_marks_and_unmarks() {
+        let repository = Arc::new(FakeChatRepository {
+            chats: Mutex::new(vec![
+                Chat { business_id: 1, user_id: "573003579384".into(), last_user_message_timestamp: None, last_user_message: None, is_important: false, last_guide_notification_at: None },
+            ]),
+        });
+        let service = ChatService::new(repository.clone());
+
+        service.set_chat_importance(1, "573003579384", true).await.unwrap();
+        assert!(repository.chats.lock().unwrap()[0].is_important);
+
+        service.set_chat_importance(1, "573003579384", false).await.unwrap();
+        assert!(!repository.chats.lock().unwrap()[0].is_important);
+
+        // Chat inexistente -> error controlado
+        assert_eq!(
+            service.set_chat_importance(1, "57999", true).await.unwrap_err(),
+            "Chat not found"
+        );
     }
 
     #[tokio::test]
@@ -86,9 +138,9 @@ mod tests {
         let now = chrono::Utc::now().naive_utc();
         let repository = Arc::new(FakeChatRepository {
             chats: Mutex::new(vec![
-                Chat { business_id: 1, user_id: "recent".into(), last_user_message_timestamp: Some(now - chrono::Duration::hours(1)), last_user_message: None },
-                Chat { business_id: 1, user_id: "old".into(), last_user_message_timestamp: Some(now - chrono::Duration::hours(48)), last_user_message: None },
-                Chat { business_id: 1, user_id: "never".into(), last_user_message_timestamp: None, last_user_message: None },
+                Chat { business_id: 1, user_id: "recent".into(), last_user_message_timestamp: Some(now - chrono::Duration::hours(1)), last_user_message: None, is_important: false, last_guide_notification_at: None },
+                Chat { business_id: 1, user_id: "old".into(), last_user_message_timestamp: Some(now - chrono::Duration::hours(48)), last_user_message: None, is_important: false, last_guide_notification_at: None },
+                Chat { business_id: 1, user_id: "never".into(), last_user_message_timestamp: None, last_user_message: None, is_important: false, last_guide_notification_at: None },
             ]),
         });
         let service = ChatService::new(repository);

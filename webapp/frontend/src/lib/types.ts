@@ -13,6 +13,8 @@ export interface ChatSummary {
   last_user_message: string | null;
   last_user_message_timestamp: string | null;
   last_activity: string | null;
+  is_important: boolean;
+  last_guide_notification_at: string | null;
   window_open: boolean;
 }
 

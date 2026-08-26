@@ -191,10 +191,17 @@ acentos azul claro de luna:
 - **`/login`** — acceso con usuario y contraseña del asociado.
 - **`/chats/{businessId}`** — bandeja de conversaciones (requiere JWT del
   business correspondiente; sin token redirige a `/login`):
-  - Panel izquierdo: chats ordenados por el último mensaje del usuario
-    (más reciente arriba), cada uno con nombre, **tiempo de gracia
-    restante** de la ventana de 24h y el último mensaje del usuario.
-    El chat seleccionado se ilumina con un gradiente blanco de luna.
+  - Panel izquierdo con el **nombre del business** en el header, chats
+    ordenados: 1) **importantes** (se marcan con el icono `!`/`?` a la
+    izquierda del nombre, vía `PATCH /chats/{bid}/{phone}/importance`),
+    2) respuesta del usuario más reciente, 3) guía notificada más
+    recientemente (`chats.last_guide_notification_at`).
+  - **Búsqueda** (icono lupa): por nombre o teléfono. **Filtros** (icono
+    embudo): Importantes / Respuestas recientes / Notificaciones
+    recientes (últimas 24h). Con búsqueda o filtros activos solo se
+    muestran los chats que los cumplen, hasta pulsar
+    "Limpiar filtros/búsqueda".
+  - El chat seleccionado se ilumina con un gradiente blanco de luna.
   - Panel derecho: historial del chat con burbujas, estados
     (✓ / ✓✓ / ✓✓ azul) y envío de mensajes libres (deshabilitado cuando
     la ventana de 24h está cerrada; el backend responde 422).
@@ -244,7 +251,8 @@ Para la webapp:
 | POST | `/businesses/{id}/associates` | Crear asociado (password con bcrypt) |
 | GET | `/businesses/{id}/associates` | Listar asociados |
 | GET | `/users` · `/users/{phone}` | Clientes finales |
-| GET | `/chats?business_id={id}` | Bandeja: último mensaje + `window_open` |
+| GET | `/chats?business_id={id}` | Bandeja ordenada (importantes > respuesta reciente > guía notificada) + `window_open` |
+| PATCH | `/chats/{bid}/{user_phone}/importance` | Marcar/desmarcar chat como importante |
 | GET | `/chats/{business_id}/{user_phone}/messages` | Historial del chat |
 | POST | `/chats/{business_id}/{user_phone}/messages` | Enviar mensaje libre (422 si la ventana de 24h está cerrada) |
 | GET | `/messages/media/{media_id}` | Multimedia de Meta en memoria (túnel, sin tocar disco) con `Content-Disposition: inline` para visualizar en el navegador |

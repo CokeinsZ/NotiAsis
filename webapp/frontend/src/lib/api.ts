@@ -1,4 +1,4 @@
-import type { ChatSummary, Message } from "./types";
+import type { Business, ChatSummary, Message } from "./types";
 import { clearToken, getToken, setToken } from "./auth";
 
 // En el navegador las llamadas pasan por el proxy /api/backend
@@ -74,6 +74,11 @@ export async function login(username: string, password: string): Promise<LoginRe
 
 // ---------------- Datos ----------------
 
+export async function getBusiness(businessId: number): Promise<Business> {
+  const data = await request<{ business: Business }>(`/businesses/${businessId}`);
+  return data.business;
+}
+
 export async function getChats(businessId: number): Promise<ChatSummary[]> {
   const data = await request<{ chats: ChatSummary[] }>(`/chats?business_id=${businessId}`);
   return data.chats;
@@ -84,6 +89,21 @@ export async function getChatMessages(businessId: number, userPhone: string): Pr
     `/chats/${businessId}/${encodeURIComponent(userPhone)}/messages`,
   );
   return data.data;
+}
+
+export async function setChatImportance(
+  businessId: number,
+  userPhone: string,
+  isImportant: boolean,
+): Promise<void> {
+  await request<{ message: string }>(
+    `/chats/${businessId}/${encodeURIComponent(userPhone)}/importance`,
+    {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ is_important: isImportant }),
+    },
+  );
 }
 
 /**

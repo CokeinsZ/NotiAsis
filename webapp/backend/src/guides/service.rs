@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 
+use crate::chats::repository::ChatRepositoryTrait;
 use crate::guides::dtos::{Guide, GuideRegistration, RegisterGuideDto};
 use crate::guides::repository::GuideRepositoryTrait;
 use crate::tools::phones::normalize_phone;
@@ -22,14 +23,16 @@ pub trait GuideServiceTrait: Send + Sync {
 pub struct GuideService {
     guide_repository: Arc<dyn GuideRepositoryTrait>,
     user_repository: Arc<dyn UserRepositoryTrait>,
+    chat_repository: Arc<dyn ChatRepositoryTrait>,
 }
 
 impl GuideService {
     pub fn new(
         guide_repository: Arc<dyn GuideRepositoryTrait>,
         user_repository: Arc<dyn UserRepositoryTrait>,
+        chat_repository: Arc<dyn ChatRepositoryTrait>,
     ) -> Self {
-        Self { guide_repository, user_repository }
+        Self { guide_repository, user_repository, chat_repository }
     }
 }
 
@@ -67,22 +70,70 @@ impl GuideServiceTrait for GuideService {
 
     async fn mark_notified(&self, number: &str) -> Result<(), String> {
         let now = chrono::Utc::now().naive_utc();
-        match self.guide_repository.mark_notified(number, now).await? {
-            true => Ok(()),
-            false => Err("Guide not found".to_string()),
-        }
+
+        let guide = self.guide_repository
+            .get_guide_by_number(number)
+            .await?
+            .ok_or_else(|| "Guide not found".to_string())?;
+
+        self.guide_repository.mark_notified(number, now).await?;
+
+        // Reflejar la notificación en los chats del usuario (criterio de
+        // orden de la bandeja).
+        self.chat_repository
+            .touch_guide_notification(&guide.user_id, now)
+            .await?;
+
+        Ok(())
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::chats::repository::ChatRepositoryTrait;
     use crate::users::dtos::User;
     use chrono::NaiveDateTime;
     use std::sync::Mutex;
 
     struct FakeGuideRepository {
         guides: Mutex<Vec<Guide>>,
+    }
+
+    struct FakeChatRepository {
+        touched: Mutex<Vec<String>>,
+    }
+
+    #[async_trait]
+    impl ChatRepositoryTrait for FakeChatRepository {
+        async fn get_chats_by_business(&self, _: i32) -> Result<Vec<crate::chats::dtos::ChatSummary>, String> {
+            Ok(Vec::new())
+        }
+
+        async fn get_chat(&self, _: i32, _: &str) -> Result<Option<crate::chats::dtos::Chat>, String> {
+            Ok(None)
+        }
+
+        async fn upsert_chat(&self, _: i32, _: &str) -> Result<(), String> {
+            Ok(())
+        }
+
+        async fn update_last_user_message(&self, _: i32, _: &str, _: &str, _: chrono::NaiveDateTime) -> Result<(), String> {
+            Ok(())
+        }
+
+        async fn find_latest_chat_business(&self, _: &str) -> Result<Option<i32>, String> {
+            Ok(None)
+        }
+
+        async fn set_importance(&self, _: i32, _: &str, _: bool) -> Result<bool, String> {
+            Ok(true)
+        }
+
+        async fn touch_guide_notification(&self, user_id: &str, _: chrono::NaiveDateTime) -> Result<u64, String> {
+            self.touched.lock().unwrap().push(user_id.to_string());
+            Ok(1)
+        }
     }
 
     impl FakeGuideRepository {
@@ -102,6 +153,7 @@ mod tests {
                 number: number.to_string(),
                 user_id: user_id.to_string(),
                 last_notification_timestamp: None,
+                notification_count: 0,
             };
             guides.push(guide.clone());
             Ok(Some(guide))
@@ -147,9 +199,14 @@ mod tests {
         }
     }
 
-    fn build_service() -> (GuideService, Arc<FakeGuideRepository>) {
+    fn build_service() -> (GuideService, Arc<FakeGuideRepository>, Arc<FakeChatRepository>) {
         let guide_repo = Arc::new(FakeGuideRepository::new());
-        (GuideService::new(guide_repo.clone(), Arc::new(FakeUserRepository)), guide_repo)
+        let chat_repo = Arc::new(FakeChatRepository { touched: Mutex::new(Vec::new()) });
+        (
+            GuideService::new(guide_repo.clone(), Arc::new(FakeUserRepository), chat_repo.clone()),
+            guide_repo,
+            chat_repo,
+        )
     }
 
     fn dto(number: &str) -> RegisterGuideDto {
@@ -162,7 +219,7 @@ mod tests {
 
     #[tokio::test]
     async fn new_guide_is_created_once() {
-        let (service, _) = build_service();
+        let (service, _, _) = build_service();
 
         let first = service.register_guide(dto("GUIA123")).await.unwrap();
         assert!(first.created);
@@ -173,20 +230,22 @@ mod tests {
 
     #[tokio::test]
     async fn different_guides_are_all_created() {
-        let (service, _) = build_service();
+        let (service, _, _) = build_service();
         assert!(service.register_guide(dto("A")).await.unwrap().created);
         assert!(service.register_guide(dto("B")).await.unwrap().created);
     }
 
     #[tokio::test]
-    async fn mark_notified_sets_timestamp() {
-        let (service, repository) = build_service();
+    async fn mark_notified_sets_timestamp_and_touches_chat() {
+        let (service, repository, chat_repo) = build_service();
         service.register_guide(dto("GUIA123")).await.unwrap();
 
         service.mark_notified("GUIA123").await.unwrap();
 
         let guide = repository.guides.lock().unwrap()[0].clone();
         assert!(guide.last_notification_timestamp.is_some());
+        // La notificación también se refleja en los chats del usuario
+        assert_eq!(chat_repo.touched.lock().unwrap().as_slice(), ["573003579384"]);
 
         assert_eq!(service.mark_notified("NOEXISTE").await.unwrap_err(), "Guide not found");
     }

@@ -6,8 +6,10 @@ use axum::{
 };
 use validator::Validate;
 
+use axum::routing::patch;
+
 use crate::auth::middleware::{AuthenticatedClaims, authorize_business};
-use crate::chats::dtos::ChatFilters;
+use crate::chats::dtos::{ChatFilters, SetImportanceDto};
 use crate::messages::dtos::SendMessageDto;
 use crate::state::ChatState;
 use crate::tools::responses::{build_validation_response, json_response};
@@ -108,10 +110,40 @@ async fn send_chat_message(
     }
 }
 
+/// Marca o desmarca un chat como importante.
+async fn set_importance(
+    claims: AuthenticatedClaims,
+    State(state): State<ChatState>,
+    Path((business_id, user_phone)): Path<(i32, String)>,
+    Json(body): Json<SetImportanceDto>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    if let Err(errors) = body.validate() {
+        return build_validation_response(errors);
+    }
+    if let Err(response) = authorize_business(&claims.0, business_id) {
+        return response;
+    }
+
+    match state.chat_service.set_chat_importance(business_id, &user_phone, body.is_important).await {
+        Ok(_) => json_response(
+            StatusCode::OK,
+            serde_json::json!({
+                "message": format!("Chat importance updated"),
+                "is_important": body.is_important
+            }),
+        ),
+        Err(e) => {
+            let status = if e == "Chat not found" { StatusCode::NOT_FOUND } else { StatusCode::BAD_REQUEST };
+            json_response(status, serde_json::json!({ "message": e }))
+        }
+    }
+}
+
 pub fn chat_routes(state: ChatState) -> Router {
     Router::new()
         .route("/", get(get_chats))
         .route("/{business_id}/{user_phone}/messages", get(get_chat_messages).post(send_chat_message))
+        .route("/{business_id}/{user_phone}/importance", patch(set_importance))
         .with_state(state)
 }
 
@@ -138,6 +170,10 @@ mod tests {
 
     #[async_trait::async_trait]
     impl ChatServiceTrait for FakeChatService {
+        async fn set_chat_importance(&self, _: i32, _: &str, _: bool) -> Result<(), String> {
+            Ok(())
+        }
+
         async fn get_chats(&self, business_id: i32) -> Result<Vec<ChatSummary>, String> {
             Ok(vec![ChatSummary {
                 business_id,
@@ -146,6 +182,8 @@ mod tests {
                 last_user_message: Some("Hola".to_string()),
                 last_user_message_timestamp: Some(chrono::Utc::now().naive_utc()),
                 last_activity: Some(chrono::Utc::now().naive_utc()),
+                is_important: false,
+                last_guide_notification_at: None,
                 window_open: true,
             }])
         }
