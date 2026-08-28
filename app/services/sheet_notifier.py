@@ -4,10 +4,12 @@ import polars as pl
 
 from app.core.interfaces import MediaUploader, MessageSender, NotificationBackend, SheetSource
 from app.models.shipping import RecipientInfo
+from app.services.notification_policy import NotificationStep, step_for_notification_count
 from app.whatsapp.templates.base import TemplateMessage
 from app.whatsapp.templates.guia import GuiaTemplate
 from app.whatsapp.templates.mensaje_guia import MensajeGuiaTemplate
 from app.whatsapp.templates.recordatorio import RecordatorioTemplate
+from app.whatsapp.templates.recordatorio_final import RecordatorioFinalTemplate
 
 
 @dataclass
@@ -17,6 +19,7 @@ class SheetNotificationReport:
     total_pending: int = 0
     new_notifications: int = 0
     reminders: int = 0
+    final_reminders: int = 0
     skipped: list[str] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
 
@@ -76,6 +79,7 @@ class SheetNotificationService:
         print(
             f"Sheet notification done for business {business_id}: "
             f"{report.new_notifications} nuevas, {report.reminders} recordatorios, "
+            f"{report.final_reminders} recordatorios finales, "
             f"{len(report.skipped)} omitidas, {len(report.errors)} errores"
         )
         return report
@@ -99,10 +103,16 @@ class SheetNotificationService:
 
         tracking = recipient.tracking_number
         try:
-            if self._backend.get_guide(tracking):
-                self._send_reminder(business_id, recipient, report)
-            else:
+            guide = self._backend.get_guide(tracking)
+            count = (guide.get("notification_count") or 0) if guide else 0
+            step = step_for_notification_count(count)
+
+            if step is NotificationStep.STOP:
+                report.skipped.append(tracking)
+            elif step is NotificationStep.INITIAL:
                 self._send_new_notification(business_id, recipient, row, report)
+            else:
+                self._send_reminder(business_id, recipient, step, report)
         except Exception as e:
             print(f"Error processing guide {tracking}: {e}")
             report.errors.append(tracking)
@@ -153,15 +163,29 @@ class SheetNotificationService:
                 media_id=template.log_media_id(),
             )
 
-    def _send_reminder(self, business_id: int, recipient: RecipientInfo, report: SheetNotificationReport) -> None:
-        sent = self._deliver(recipient, [RecordatorioTemplate(recipient)])
+    def _send_reminder(
+        self,
+        business_id: int,
+        recipient: RecipientInfo,
+        step: NotificationStep,
+        report: SheetNotificationReport,
+    ) -> None:
+        factory = (
+            RecordatorioTemplate
+            if step is NotificationStep.REMINDER
+            else RecordatorioFinalTemplate
+        )
+        sent = self._deliver(recipient, [factory(recipient)])
         if not sent:
             report.errors.append(recipient.tracking_number)
             return
 
         self._register_outgoing(business_id, recipient, sent)
         self._backend.mark_guide_notified(recipient.tracking_number)
-        report.reminders += 1
+        if step is NotificationStep.REMINDER:
+            report.reminders += 1
+        else:
+            report.final_reminders += 1
 
     def _send_new_notification(
         self,

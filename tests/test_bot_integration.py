@@ -15,7 +15,9 @@ from app.whatsapp.client import WhatsAppClient
 
 
 class FakeBackend:
-    def __init__(self, guides_created: bool = True):
+    def __init__(self, guides_created: bool = True, guide_counts=None):
+        # guide_counts: {numero_guia: notification_count actual}
+        self.guide_counts = dict(guide_counts or {})
         self.guides_created = guides_created
         self.guides_registered = []
         self.guides_notified = []
@@ -27,12 +29,23 @@ class FakeBackend:
     def fetch_authorized_associates(self):
         return self.associates
 
+    def get_guide(self, number):
+        if number in self.guide_counts:
+            return {"number": number, "notification_count": self.guide_counts[number]}
+        return None
+
     def register_guide(self, number, user_phone, user_name):
+        if number in self.guide_counts:
+            return False
         self.guides_registered.append((number, user_phone, user_name))
+        if self.guides_created:
+            self.guide_counts[number] = 0
         return self.guides_created
 
     def mark_guide_notified(self, number):
         self.guides_notified.append(number)
+        if number in self.guide_counts:
+            self.guide_counts[number] += 1
 
     def register_incoming_message(self, **kwargs):
         self.incoming.append(kwargs)
@@ -162,16 +175,45 @@ def test_new_guide_sends_templates_and_registers_everything():
     assert backend.guides_notified == ["GUIA123"]
 
 
-def test_duplicate_guide_is_not_notified_again():
-    backend = FakeBackend(guides_created=False)  # guía ya existía
+def test_guide_notified_once_gets_reminder():
+    # Guía ya notificada 1 vez -> plantilla recordatorio
+    backend = FakeBackend(guide_counts={"GUIA123": 1})
+    sender = FakeSender()
+    notifier = build_notifier(backend, sender)
+
+    result = notifier.notify_pdf_guide("MEDIA123", associate_phone="573003579384")
+
+    assert result is True
+    assert [(to, name) for to, name, _ in sender.sent] == [("573001234567", "recordatorio")]
+    assert backend.guides_notified == ["GUIA123"]
+    assert len(backend.outgoing) == 1
+    assert "Tu pedido te espera" in backend.outgoing[0]["message"]
+
+
+def test_guide_notified_twice_gets_final_reminder():
+    # Guía ya notificada 2 veces -> plantilla recordatorio_final
+    backend = FakeBackend(guide_counts={"GUIA123": 2})
+    sender = FakeSender()
+    notifier = build_notifier(backend, sender)
+
+    result = notifier.notify_pdf_guide("MEDIA123", associate_phone="573003579384")
+
+    assert result is True
+    assert [(to, name) for to, name, _ in sender.sent] == [("573001234567", "recordatorio_final")]
+    assert "Reclama tu pedido" in backend.outgoing[0]["message"]
+
+
+def test_guide_at_max_notifications_gets_nothing():
+    # Guía ya notificada 3 veces -> no hacer nada
+    backend = FakeBackend(guide_counts={"GUIA123": 3})
     sender = FakeSender()
     notifier = build_notifier(backend, sender)
 
     result = notifier.notify_pdf_guide("MEDIA123", associate_phone="573003579384")
 
     assert result is False
-    assert sender.sent == []          # no se envió nada
-    assert backend.outgoing == []     # no se registró nada
+    assert sender.sent == []
+    assert backend.outgoing == []
     assert backend.guides_notified == []
 
 
@@ -518,3 +560,16 @@ def test_mensaje_guia_template_full_text():
         "\n"
         "¡Disfruta!"
     )
+
+
+# ------------------------------ Política de escalación ------------------------------
+
+
+def test_notification_policy_steps():
+    from app.services.notification_policy import NotificationStep, step_for_notification_count
+
+    assert step_for_notification_count(0) is NotificationStep.INITIAL
+    assert step_for_notification_count(1) is NotificationStep.REMINDER
+    assert step_for_notification_count(2) is NotificationStep.FINAL_REMINDER
+    assert step_for_notification_count(3) is NotificationStep.STOP
+    assert step_for_notification_count(10) is NotificationStep.STOP

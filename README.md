@@ -77,6 +77,22 @@ Todos los teléfonos se normalizan sin '+' en ambos servicios antes de
 guardarse o compararse (los números de 10 dígitos, como los del Google
 Sheet, reciben el prefijo 57).
 
+### Escalación de notificaciones (webhook y Google Sheet por igual)
+
+Una guía se notifica como máximo 3 veces (`guides.notification_count`):
+
+| Veces notificada antes | Plantillas enviadas |
+|---|---|
+| 0 (nueva) | `guia` + `mensaje_guia_es` |
+| 1 | `recordatorio` |
+| 2 | `recordatorio_final` |
+| 3 o más | nada (máximo alcanzado) |
+
+La decisión vive en `app/services/notification_policy.py`
+(`step_for_notification_count`, función pura) y la usan tanto
+`ShippingNotificationService` (PDF por WhatsApp) como
+`SheetNotificationService` (Google Sheet).
+
 ### Notificación masiva desde Google Sheet
 
 `POST /notify-sheet` con `{"business_id": N}` (responde 202 y procesa en

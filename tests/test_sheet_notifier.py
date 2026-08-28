@@ -45,8 +45,10 @@ class FakeSheetSource:
 
 
 class FakeBackend:
-    def __init__(self, existing_guides=(), sheet_config=None):
-        self.existing_guides = set(existing_guides)
+    def __init__(self, existing_guides=(), guide_counts=None, sheet_config=None):
+        # existing_guides: guías notificadas 1 vez (atajo); guide_counts: {guia: count}
+        self.guide_counts = {n: 1 for n in existing_guides}
+        self.guide_counts.update(guide_counts or {})
         self.sheet_config = sheet_config or {
             "document_id": "doc1",
             "office_id": "office-gid",
@@ -60,17 +62,21 @@ class FakeBackend:
         return self.sheet_config
 
     def get_guide(self, number):
-        return {"number": number} if number in self.existing_guides else None
+        if number in self.guide_counts:
+            return {"number": number, "notification_count": self.guide_counts[number]}
+        return None
 
     def register_guide(self, number, user_phone, user_name):
-        if number in self.existing_guides:
+        if number in self.guide_counts:
             return False
-        self.existing_guides.add(number)
+        self.guide_counts[number] = 0
         self.guides_registered.append(number)
         return True
 
     def mark_guide_notified(self, number):
         self.guides_notified.append(number)
+        if number in self.guide_counts:
+            self.guide_counts[number] += 1
 
     def register_outgoing_message(self, **kwargs):
         self.outgoing.append(kwargs)
@@ -118,9 +124,9 @@ def delivered_row(guia):
     return {"numero_guia": guia, "TELEFONO": "3000000000", "NOMBRE": "X", "DIRECCION": "Y", "CIUDAD": "Z", "DEPARTAMENTO": "W", "PRODUCTO": "P"}
 
 
-def build_service(office_rows, delivered_rows, existing_guides=()):
+def build_service(office_rows, delivered_rows, existing_guides=(), guide_counts=None):
     sheet_source = FakeSheetSource(office_rows, delivered_rows)
-    backend = FakeBackend(existing_guides)
+    backend = FakeBackend(existing_guides, guide_counts)
     sender = FakeSender()
     uploader = FakeUploader()
     service = SheetNotificationService(
@@ -286,3 +292,35 @@ def test_debug_number_receives_copy():
     # Una al destinatario real y una copia al número debug
     targets = [to for to, _, _ in sender.sent]
     assert targets == ["573222222222", "573003579384"]
+
+
+# ------------------------------ Escalación de recordatorios ------------------------------
+
+
+def test_guide_notified_twice_gets_final_reminder():
+    service, _, backend, sender, _ = build_service(
+        office_rows=[office_row("Juan", "3117039771", "G30")],
+        delivered_rows=[],
+        guide_counts={"G30": 2},  # notificada 2 veces
+    )
+
+    report = service.notify_business_sheet(1)
+
+    assert report.final_reminders == 1
+    assert report.reminders == 0
+    assert [name for _, name, _ in sender.sent] == ["recordatorio_final"]
+    assert "Reclama tu pedido" in sender.sent[0][2]
+
+
+def test_guide_at_max_notifications_is_skipped():
+    service, _, backend, sender, _ = build_service(
+        office_rows=[office_row("Juan", "3117039771", "G31")],
+        delivered_rows=[],
+        guide_counts={"G31": 3},  # máximo alcanzado
+    )
+
+    report = service.notify_business_sheet(1)
+
+    assert report.skipped == ["G31"]
+    assert sender.sent == []
+    assert backend.guides_notified == []

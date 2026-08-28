@@ -9,21 +9,32 @@ from app.core.interfaces import (
 )
 from app.models.shipping import RecipientInfo
 from app.services.associate_directory import AssociateDirectory
+from app.services.notification_policy import NotificationStep, step_for_notification_count
 from app.whatsapp.templates.base import TemplateMessage
 from app.whatsapp.templates.guia import GuiaTemplate
 from app.whatsapp.templates.mensaje_guia import MensajeGuiaTemplate
+from app.whatsapp.templates.recordatorio import RecordatorioTemplate
+from app.whatsapp.templates.recordatorio_final import RecordatorioFinalTemplate
 
-# Plantillas que se envían por cada guía recibida, en orden de envío:
-# primero el PDF de la guía y luego el mensaje con la información extraída.
-DEFAULT_TEMPLATE_FACTORIES: list = [GuiaTemplate, MensajeGuiaTemplate]
+# Plantillas que se envían la primera vez que se notifica una guía,
+# en orden de envío: primero el PDF de la guía y luego el mensaje
+# con la información extraída.
+DEFAULT_TEMPLATE_FACTORIES: tuple = (GuiaTemplate, MensajeGuiaTemplate)
+
+# Plantilla de recordatorio según el número de notificaciones previas.
+REMINDER_FACTORIES = {
+    NotificationStep.REMINDER: RecordatorioTemplate,
+    NotificationStep.FINAL_REMINDER: RecordatorioFinalTemplate,
+}
 
 
 class ShippingNotificationService:
     """Orquesta el flujo de negocio de notificación de guías de envío:
 
     descargar el PDF de la guía -> extraer su texto -> extraer los datos
-    del destinatario -> verificar que la guía no haya sido notificada ->
-    enviar las plantillas -> registrar los mensajes en el backend.
+    del destinatario -> decidir el paso de notificación según cuántas
+    veces se haya notificado antes (política de escalación) -> enviar las
+    plantillas -> registrar los mensajes en el backend.
     """
 
     def __init__(
@@ -49,9 +60,11 @@ class ShippingNotificationService:
         self._template_factories = tuple(template_factories)
 
     def notify_pdf_guide(self, media_id: str, associate_phone: str) -> bool:
-        """Procesa una guía en PDF y notifica al destinatario una sola vez.
+        """Procesa una guía en PDF y notifica al destinatario según la
+        escalación: inicial (guía+mensaje) -> recordatorio ->
+        recordatorio_final -> nada (máximo alcanzado).
 
-        Retorna True si la notificación fue enviada con éxito.
+        Retorna True si se envió alguna notificación.
         """
         media_url = self._media_repository.get_media_url(media_id)
         if not media_url:
@@ -80,12 +93,6 @@ class ShippingNotificationService:
             f"Producto: {recipient.product}"
         )
 
-        # Deduplicación: la misma guía solo se notifica una vez.
-        if not self._backend.register_guide(
-            recipient.tracking_number, recipient.phone, recipient.name
-        ):
-            return False
-
         business_id = self._associate_directory.business_id_for(associate_phone)
         if business_id is None:
             print(
@@ -93,29 +100,41 @@ class ShippingNotificationService:
                 "outgoing messages will not be registered in the chat history."
             )
 
-        sent = self._notify_recipient(recipient, media_id, business_id)
+        tracking_number = recipient.tracking_number
+        existing_guide = self._backend.get_guide(tracking_number)
+
+        if existing_guide is None:
+            # Guía nunca notificada: registrar y enviar plantillas iniciales.
+            if not self._backend.register_guide(tracking_number, recipient.phone, recipient.name):
+                # Carrera rara: otro proceso la registró mientras tanto.
+                return False
+            templates = [factory(recipient, media_id) for factory in self._template_factories]
+        else:
+            step = step_for_notification_count(existing_guide.get("notification_count") or 0)
+            print(f"Guide {tracking_number} already notified (step: {step.value})")
+
+            if step is NotificationStep.STOP:
+                return False
+            if step is NotificationStep.INITIAL:
+                templates = [factory(recipient, media_id) for factory in self._template_factories]
+            else:
+                templates = [REMINDER_FACTORIES[step](recipient, media_id)]
+
+        sent = self._notify_recipient(recipient, templates, business_id)
         if sent:
-            self._backend.mark_guide_notified(recipient.tracking_number)
+            self._backend.mark_guide_notified(tracking_number)
         return sent
 
     def _notify_recipient(
         self,
         recipient: RecipientInfo,
-        media_id: str,
+        templates: list[TemplateMessage],
         business_id: int | None,
     ) -> bool:
-        """Envía las plantillas configuradas, en orden, y las registra."""
-        templates = [factory(recipient, media_id) for factory in self._template_factories]
-
+        """Envía las plantillas dadas, en orden, y las registra."""
         # Mientras NOTIFICATION_OVERRIDE_NUMBER esté configurado, todas las
         # notificaciones se desvían a ese número (útil en pruebas).
-        target_number = recipient.phone
-        if self._notification_override_number:
-            print(
-                f"Notification override is active. All messages will be sent to "
-                f"{self._notification_override_number} instead of {recipient.phone}."
-            )
-            target_number = self._notification_override_number
+        target_number = self._notification_override_number or recipient.phone
 
         sent_templates: list[tuple[TemplateMessage, str]] = []
         for template in templates:
@@ -126,10 +145,6 @@ class ShippingNotificationService:
         # Copia de depuración a un número interno, si está configurado.
         debug_number = self._debug_notification_number
         if debug_number and debug_number != target_number:
-            print(
-                f"Debug notification is active. A copy of the messages will be sent to "
-                f"{debug_number}."
-            )
             for template in templates:
                 self._message_sender.send_template(debug_number, template)
 
