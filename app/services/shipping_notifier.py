@@ -105,12 +105,19 @@ class ShippingNotificationService:
 
         if existing_guide is None:
             # Guía nunca notificada: registrar y enviar plantillas iniciales.
-            if not self._backend.register_guide(tracking_number, recipient.phone, recipient.name):
+            if business_id is None:
+                # Sin business (asociado del fallback local): no se puede
+                # registrar la guía; se notifica igual (fail-open).
+                print(f"Guide {tracking_number} will not be registered: associate without business")
+            elif not self._backend.register_guide(tracking_number, recipient.phone, recipient.name, business_id):
                 # Carrera rara: otro proceso la registró mientras tanto.
                 return False
             templates = [factory(recipient, media_id) for factory in self._template_factories]
         else:
-            step = step_for_notification_count(existing_guide.get("notification_count") or 0)
+            step = step_for_notification_count(
+                existing_guide.get("notification_count") or 0,
+                existing_guide.get("last_notification_timestamp"),
+            )
             print(f"Guide {tracking_number} already notified (step: {step.value})")
 
             if step is NotificationStep.STOP:

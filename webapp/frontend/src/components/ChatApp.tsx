@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useState } from "react";
+import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { getBusiness, getChats } from "@/lib/api";
 import { clearToken, getValidClaims } from "@/lib/auth";
@@ -165,9 +166,23 @@ export default function ChatApp({ businessId }: { businessId: number }) {
       <aside className="flex w-96 shrink-0 flex-col border-r border-moon/35">
         <header className="border-b border-moon/35 px-4 py-4">
           <div className="flex items-center justify-between">
-            <h1 className="truncate text-lg font-semibold tracking-widest">
-              {businessName || "NotiAsis"}
-            </h1>
+            <div className="flex min-w-0 items-center gap-2">
+              <h1 className="truncate text-lg font-semibold tracking-widest">
+                {businessName || "NotiAsis"}
+              </h1>
+              <Link
+                href={`/chats/${businessId}/dashboard`}
+                title="Dashboard de notificaciones"
+                className="shrink-0 text-neutral-500 transition-colors hover:text-moon"
+              >
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
+                  <line x1="4" y1="20" x2="4" y2="12" />
+                  <line x1="10" y1="20" x2="10" y2="6" />
+                  <line x1="16" y1="20" x2="16" y2="14" />
+                  <line x1="22" y1="20" x2="22" y2="3" />
+                </svg>
+              </Link>
+            </div>
             <button
               onClick={handleLogout}
               className="shrink-0 text-xs text-neutral-500 transition-colors hover:text-moon"

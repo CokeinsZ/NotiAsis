@@ -1,11 +1,12 @@
 use axum::{
     Json, Router,
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::StatusCode,
     routing::{get, post},
 };
 use validator::Validate;
 
+use crate::auth::middleware::{AuthenticatedClaims, authorize_business};
 use crate::businesses::dtos::{CreateAssociateDto, CreateBusinessDto};
 use crate::state::BusinessState;
 use crate::tools::responses::{build_validation_response, json_response};
@@ -133,6 +134,39 @@ async fn get_all_associates(
     }
 }
 
+/// Estadísticas de notificaciones por día y tipo para el dashboard.
+/// Solo accesible con un JWT autorizado para ese business.
+async fn get_notification_stats(
+    claims: AuthenticatedClaims,
+    State(state): State<BusinessState>,
+    Path(business_id): Path<i32>,
+    Query(filters): Query<NotificationStatsFiltersQuery>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    if let Err(response) = authorize_business(&claims.0, business_id) {
+        return response;
+    }
+
+    match state.guide_service.get_notification_stats(business_id, filters.days).await {
+        Ok(stats) => json_response(
+            StatusCode::OK,
+            serde_json::json!({
+                "message": "Notification stats retrieved",
+                "stats": stats
+            }),
+        ),
+        Err(e) => json_response(
+            StatusCode::BAD_REQUEST,
+            serde_json::json!({ "message": e }),
+        ),
+    }
+}
+
+/// Query params del endpoint de estadísticas (el business_id va en el path).
+#[derive(Debug, serde::Deserialize)]
+pub struct NotificationStatsFiltersQuery {
+    pub days: Option<i32>,
+}
+
 /// Configuración del Google Sheet de usuarios a notificar de un business.
 /// La consulta el bot para el endpoint de notificación masiva.
 async fn get_business_sheet(
@@ -179,6 +213,7 @@ pub fn business_routes(state: BusinessState) -> Router {
         .route("/", post(create_business).get(get_businesses))
         .route("/{id}", get(get_business))
         .route("/{id}/sheet", get(get_business_sheet))
+        .route("/{id}/stats/notifications", get(get_notification_stats))
         .route("/{id}/associates", post(create_associate).get(get_associates))
         .with_state(state)
 }

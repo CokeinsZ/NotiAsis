@@ -93,6 +93,20 @@ La decisión vive en `app/services/notification_policy.py`
 `ShippingNotificationService` (PDF por WhatsApp) como
 `SheetNotificationService` (Google Sheet).
 
+Reglas duras adicionales: una guía nunca recibe más de una notificación
+por día, y la corrida del sheet deduplica `numero_guia` antes de procesar
+(la hoja office a veces repite filas de la misma guía).
+
+Cada guía registrada guarda su `business_id` (del asociado que la envió
+por WhatsApp o del business cuya hoja se procesó).
+
+### Dashboard de notificaciones
+
+`GET /businesses/{id}/stats/notifications?days=N` (JWT, solo el business
+dueño) devuelve las notificaciones por día y tipo. La webapp lo muestra en
+`/chats/{businessId}/dashboard` (icono de gráfica junto al nombre del
+business): barras apiladas por día con selector de 7/30/90 días.
+
 ### Notificación masiva desde Google Sheet
 
 `POST /notify-sheet` con `{"business_id": N}` (responde 202 y procesa en

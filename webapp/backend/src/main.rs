@@ -61,6 +61,7 @@ fn build_app(pool: sqlx::PgPool, meta_client: Arc<dyn MetaClientTrait>, jwt_secr
     };
     let business_state = BusinessState {
         business_service,
+        guide_service: guide_service.clone(),
         global_state: app_state_pointer.clone(),
     };
     let user_state = UserState {

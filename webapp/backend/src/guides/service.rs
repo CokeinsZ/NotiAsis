@@ -3,7 +3,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 
 use crate::chats::repository::ChatRepositoryTrait;
-use crate::guides::dtos::{Guide, GuideRegistration, RegisterGuideDto};
+use crate::guides::dtos::{DailyNotificationStat, Guide, GuideRegistration, RegisterGuideDto};
 use crate::guides::repository::GuideRepositoryTrait;
 use crate::tools::phones::normalize_phone;
 use crate::users::repository::UserRepositoryTrait;
@@ -18,6 +18,8 @@ pub trait GuideServiceTrait: Send + Sync {
     /// notificación completa o recordatorio).
     async fn get_guide(&self, number: &str) -> Result<Guide, String>;
     async fn mark_notified(&self, number: &str) -> Result<(), String>;
+    /// Estadísticas de notificaciones por día y tipo para el dashboard.
+    async fn get_notification_stats(&self, business_id: i32, days: Option<i32>) -> Result<Vec<DailyNotificationStat>, String>;
 }
 
 pub struct GuideService {
@@ -45,7 +47,7 @@ impl GuideServiceTrait for GuideService {
             .upsert_user(&user_phone, dto.user_name.as_deref().unwrap_or(""))
             .await?;
 
-        if let Some(guide) = self.guide_repository.insert_guide_if_new(&dto.number, &user_phone).await? {
+        if let Some(guide) = self.guide_repository.insert_guide_if_new(&dto.number, &user_phone, dto.business_id).await? {
             return Ok(GuideRegistration { guide, created: true });
         }
 
@@ -66,6 +68,12 @@ impl GuideServiceTrait for GuideService {
             Some(guide) => Ok(guide),
             None => Err("Guide not found".to_string()),
         }
+    }
+
+    async fn get_notification_stats(&self, business_id: i32, days: Option<i32>) -> Result<Vec<DailyNotificationStat>, String> {
+        self.guide_repository
+            .get_notification_stats(business_id, days.unwrap_or(30))
+            .await
     }
 
     async fn mark_notified(&self, number: &str) -> Result<(), String> {
@@ -144,7 +152,7 @@ mod tests {
 
     #[async_trait]
     impl GuideRepositoryTrait for FakeGuideRepository {
-        async fn insert_guide_if_new(&self, number: &str, user_id: &str) -> Result<Option<Guide>, String> {
+        async fn insert_guide_if_new(&self, number: &str, user_id: &str, business_id: i32) -> Result<Option<Guide>, String> {
             let mut guides = self.guides.lock().unwrap();
             if guides.iter().any(|g| g.number == number) {
                 return Ok(None);
@@ -152,6 +160,7 @@ mod tests {
             let guide = Guide {
                 number: number.to_string(),
                 user_id: user_id.to_string(),
+                business_id,
                 last_notification_timestamp: None,
                 notification_count: 0,
             };
@@ -179,6 +188,10 @@ mod tests {
                 }
                 None => Ok(false),
             }
+        }
+
+        async fn get_notification_stats(&self, _: i32, _: i32) -> Result<Vec<DailyNotificationStat>, String> {
+            Ok(Vec::new())
         }
     }
 
@@ -214,6 +227,7 @@ mod tests {
             number: number.to_string(),
             user_phone: "573003579384".to_string(),
             user_name: Some("Stiven".to_string()),
+            business_id: 1,
         }
     }
 

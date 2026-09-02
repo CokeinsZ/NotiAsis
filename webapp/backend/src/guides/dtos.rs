@@ -15,6 +15,7 @@ static PHONE_REGEX: Lazy<Regex> = Lazy::new(|| {
 pub struct Guide {
     pub number: String,
     pub user_id: String,
+    pub business_id: i32,
     pub last_notification_timestamp: Option<NaiveDateTime>,
     pub notification_count: i32,
 }
@@ -31,6 +32,9 @@ pub struct RegisterGuideDto {
 
     #[validate(length(max = 255))]
     pub user_name: Option<String>,
+
+    #[validate(range(min = 1, message = "El business_id debe ser positivo"))]
+    pub business_id: i32,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -45,6 +49,16 @@ pub struct GuideFilters {
     pub user_phone: Option<String>,
 }
 
+/// Fila de estadísticas: notificaciones de guías por día y tipo
+/// (notification_count: 1=inicial, 2=recordatorio, 3=recordatorio final).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(sqlx::FromRow)]
+pub struct DailyNotificationStat {
+    pub day: chrono::NaiveDate,
+    pub notification_count: i32,
+    pub total: i64,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -55,10 +69,19 @@ mod tests {
             number: "GUIA123".into(),
             user_phone: "573003579384".into(),
             user_name: Some("Stiven".into()),
+            business_id: 1,
         };
         assert!(valid.validate().is_ok());
 
-        let invalid_phone = RegisterGuideDto { number: valid.number, user_phone: "abc".into(), user_name: None };
+        let mut invalid_phone = RegisterGuideDto {
+            number: valid.number.clone(),
+            user_phone: "abc".into(),
+            user_name: None,
+            business_id: 1,
+        };
+        assert!(invalid_phone.validate().is_err());
+        invalid_phone.user_phone = "573003579384".into();
+        invalid_phone.business_id = 0;
         assert!(invalid_phone.validate().is_err());
     }
 }

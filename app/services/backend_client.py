@@ -72,7 +72,7 @@ class RustBackendClient(NotificationBackend):
             print(f"Error fetching authorized associates from backend: {e}")
             return {}
 
-    def register_guide(self, number: str, user_phone: str, user_name: str) -> bool:
+    def register_guide(self, number: str, user_phone: str, user_name: str, business_id: int) -> bool:
         try:
             response = self._request(
                 "POST",
@@ -81,6 +81,7 @@ class RustBackendClient(NotificationBackend):
                     "number": number,
                     "user_phone": normalize_phone(user_phone),
                     "user_name": user_name,
+                    "business_id": business_id,
                 },
             )
             response.raise_for_status()

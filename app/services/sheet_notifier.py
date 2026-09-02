@@ -91,7 +91,14 @@ class SheetNotificationService:
         Las filas sin numero_guia se excluyen del cruce (los vacíos
         harían match entre sí).
         """
-        office_valid = office.filter(pl.col("numero_guia").is_not_null() & (pl.col("numero_guia") != ""))
+        office_valid = (
+            office
+            .filter(pl.col("numero_guia").is_not_null() & (pl.col("numero_guia") != ""))
+            # La hoja office a veces trae la misma guía en varias filas;
+            # sin este dedup se escalaría recordatorio + recordatorio_final
+            # en la misma corrida.
+            .unique(subset=["numero_guia"], keep="first", maintain_order=True)
+        )
         delivered_valid = delivered.filter(pl.col("numero_guia").is_not_null() & (pl.col("numero_guia") != ""))
         return office_valid.join(delivered_valid, on="numero_guia", how="anti")
 
@@ -105,7 +112,8 @@ class SheetNotificationService:
         try:
             guide = self._backend.get_guide(tracking)
             count = (guide.get("notification_count") or 0) if guide else 0
-            step = step_for_notification_count(count)
+            last_notified = guide.get("last_notification_timestamp") if guide else None
+            step = step_for_notification_count(count, last_notified)
 
             if step is NotificationStep.STOP:
                 report.skipped.append(tracking)
@@ -208,7 +216,7 @@ class SheetNotificationService:
             report.errors.append(tracking)
             return
 
-        if not self._backend.register_guide(tracking, recipient.phone, recipient.name):
+        if not self._backend.register_guide(tracking, recipient.phone, recipient.name, business_id):
             # Carrera rara: otro proceso la registró mientras tanto.
             report.skipped.append(tracking)
             return

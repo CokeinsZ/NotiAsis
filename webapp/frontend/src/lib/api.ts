@@ -1,4 +1,4 @@
-import type { Business, ChatSummary, Message } from "./types";
+import type { Business, ChatSummary, Message, NotificationStatRow } from "./types";
 import { clearToken, getToken, setToken } from "./auth";
 
 // En el navegador las llamadas pasan por el proxy /api/backend
@@ -89,6 +89,16 @@ export async function getChatMessages(businessId: number, userPhone: string): Pr
     `/chats/${businessId}/${encodeURIComponent(userPhone)}/messages`,
   );
   return data.data;
+}
+
+export async function getNotificationStats(
+  businessId: number,
+  days: number,
+): Promise<NotificationStatRow[]> {
+  const data = await request<{ stats: NotificationStatRow[] }>(
+    `/businesses/${businessId}/stats/notifications?days=${days}`,
+  );
+  return data.stats;
 }
 
 export async function setChatImportance(

@@ -107,6 +107,7 @@ CREATE TABLE IF NOT EXISTS messages (
 CREATE TABLE IF NOT EXISTS guides (
 	number VARCHAR(20) PRIMARY KEY,
 	user_id VARCHAR(20) NOT NULL,
+    business_id INT NOT NULL,
 	last_notification_timestamp TIMESTAMP,
 	notification_count INT NOT NULL DEFAULT 0,
 

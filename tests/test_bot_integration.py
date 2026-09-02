@@ -31,13 +31,17 @@ class FakeBackend:
 
     def get_guide(self, number):
         if number in self.guide_counts:
-            return {"number": number, "notification_count": self.guide_counts[number]}
+            return {
+                "number": number,
+                "notification_count": self.guide_counts[number],
+                "last_notification_timestamp": getattr(self, "guide_last_notified", {}).get(number),
+            }
         return None
 
-    def register_guide(self, number, user_phone, user_name):
+    def register_guide(self, number, user_phone, user_name, business_id):
         if number in self.guide_counts:
             return False
-        self.guides_registered.append((number, user_phone, user_name))
+        self.guides_registered.append((number, user_phone, user_name, business_id))
         if self.guides_created:
             self.guide_counts[number] = 0
         return self.guides_created
@@ -155,7 +159,7 @@ def test_new_guide_sends_templates_and_registers_everything():
 
     assert result is True
     # Guía registrada con el teléfono normalizado (sin '+')
-    assert backend.guides_registered == [("GUIA123", "573001234567", "Juan Perez")]
+    assert backend.guides_registered == [("GUIA123", "573001234567", "Juan Perez", 1)]
     # Dos plantillas enviadas al destinatario real (normalizado), en orden
     assert [(to, name) for to, name, _ in sender.sent] == [
         ("573001234567", "guia"),
@@ -326,7 +330,7 @@ def test_associate_pdf_triggers_guide_flow():
     })
 
     # El flujo completo se ejecutó (con fakes de Meta/DeepSeek)
-    assert backend.guides_registered == [("GUIA123", "573001234567", "Juan Perez")]
+    assert backend.guides_registered == [("GUIA123", "573001234567", "Juan Perez", 1)]
     assert len(sender.sent) == 2
     # El PDF del asociado NO se registra como mensaje incoming del chat
     assert backend.incoming == []
@@ -518,7 +522,7 @@ def test_client_survives_backend_down():
     client._session = DownSession()
 
     assert client.fetch_authorized_associates() == {}       # fail-open
-    assert client.register_guide("G1", "57300", "Juan")     # no lanza
+    assert client.register_guide("G1", "57300", "Juan", 1)     # no lanza
 
 
 # ------------------------------ Texto completo de plantillas ------------------------------
@@ -573,3 +577,36 @@ def test_notification_policy_steps():
     assert step_for_notification_count(2) is NotificationStep.FINAL_REMINDER
     assert step_for_notification_count(3) is NotificationStep.STOP
     assert step_for_notification_count(10) is NotificationStep.STOP
+
+
+def test_notification_policy_one_per_day():
+    from datetime import date
+    from app.services.notification_policy import NotificationStep, step_for_notification_count
+
+    today = date(2026, 8, 24)
+
+    # Notificada hoy -> STOP sin importar el count
+    assert step_for_notification_count(1, "2026-08-24T10:00:00", today) is NotificationStep.STOP
+    assert step_for_notification_count(2, "2026-08-24T10:00:00", today) is NotificationStep.STOP
+    assert step_for_notification_count(0, "2026-08-24T10:00:00", today) is NotificationStep.STOP
+
+    # Notificada ayer -> escala normal
+    assert step_for_notification_count(1, "2026-08-23T23:59:59", today) is NotificationStep.REMINDER
+    assert step_for_notification_count(2, "2026-08-23T10:00:00", today) is NotificationStep.FINAL_REMINDER
+
+    # Sin fecha (nunca notificada) -> inicial
+    assert step_for_notification_count(0, None, today) is NotificationStep.INITIAL
+
+
+def test_webhook_duplicate_guide_same_day_gets_nothing():
+    from datetime import datetime
+    backend = FakeBackend(guide_counts={"GUIA123": 1})
+    # La guía fue notificada HOY (timestamp del backend, formato ISO)
+    backend.guide_last_notified = {"GUIA123": datetime.now().isoformat()}
+    sender = FakeSender()
+    notifier = build_notifier(backend, sender)
+
+    result = notifier.notify_pdf_guide("MEDIA123", associate_phone="573003579384")
+
+    assert result is False
+    assert sender.sent == []  # nada: ya se notificó hoy

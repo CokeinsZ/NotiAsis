@@ -21,6 +21,21 @@ export interface ChatSummary {
 export type MediaType = "text" | "document" | "audio" | "image";
 export type MessageStatus = "sent" | "delivered" | "read";
 
+/** Fila cruda del backend: notificaciones por día y notification_count. */
+export interface NotificationStatRow {
+  day: string; // "2026-08-30"
+  notification_count: number; // 1=inicial, 2=recordatorio, 3=final
+  total: number;
+}
+
+/** Un día de la gráfica, con los tres tipos ya pivotados. */
+export interface DayStats {
+  day: string;
+  initial: number;
+  reminder: number;
+  final: number;
+}
+
 export interface Message {
   id: number;
   meta_message_id: string;

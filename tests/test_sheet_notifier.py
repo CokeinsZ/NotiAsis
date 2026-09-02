@@ -63,10 +63,14 @@ class FakeBackend:
 
     def get_guide(self, number):
         if number in self.guide_counts:
-            return {"number": number, "notification_count": self.guide_counts[number]}
+            return {
+                "number": number,
+                "notification_count": self.guide_counts[number],
+                "last_notification_timestamp": getattr(self, "guide_last_notified", {}).get(number),
+            }
         return None
 
-    def register_guide(self, number, user_phone, user_name):
+    def register_guide(self, number, user_phone, user_name, business_id):
         if number in self.guide_counts:
             return False
         self.guide_counts[number] = 0
@@ -324,3 +328,57 @@ def test_guide_at_max_notifications_is_skipped():
     assert report.skipped == ["G31"]
     assert sender.sent == []
     assert backend.guides_notified == []
+
+
+# ------------------------------ Duplicados y regla de 1/día ------------------------------
+
+
+def test_duplicate_guide_rows_in_office_send_only_once():
+    """La hoja office a veces repite la misma guía en varias filas; sin el
+    dedup escalaría recordatorio + recordatorio_final en la misma corrida."""
+    service, _, backend, sender, _ = build_service(
+        office_rows=[
+            office_row("Juan", "3117039771", "G40"),
+            office_row("Juan Duplicado", "3117039771", "G40"),  # misma guía
+        ],
+        delivered_rows=[],
+    )
+
+    report = service.notify_business_sheet(1)
+
+    assert report.total_pending == 1  # deduplicada
+    assert report.new_notifications == 1
+    assert [name for _, name, _ in sender.sent] == ["guia", "mensaje_guia_es"]
+
+
+def test_guide_already_notified_today_is_skipped():
+    from datetime import datetime
+
+    service, _, backend, sender, _ = build_service(
+        office_rows=[office_row("Juan", "3117039771", "G41")],
+        delivered_rows=[],
+        guide_counts={"G41": 1},
+    )
+    backend.guide_last_notified = {"G41": datetime.now().isoformat()}  # notificada HOY
+
+    report = service.notify_business_sheet(1)
+
+    assert report.skipped == ["G41"]
+    assert sender.sent == []
+
+
+def test_guide_notified_yesterday_gets_reminder():
+    from datetime import datetime, timedelta
+
+    service, _, backend, sender, _ = build_service(
+        office_rows=[office_row("Juan", "3117039771", "G42")],
+        delivered_rows=[],
+        guide_counts={"G42": 1},
+    )
+    yesterday = (datetime.now() - timedelta(days=1)).isoformat()
+    backend.guide_last_notified = {"G42": yesterday}
+
+    report = service.notify_business_sheet(1)
+
+    assert report.reminders == 1
+    assert [name for _, name, _ in sender.sent] == ["recordatorio"]

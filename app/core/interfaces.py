@@ -92,8 +92,8 @@ class NotificationBackend(ABC):
         autorizados a enviar guías. {} si el backend no responde."""
 
     @abstractmethod
-    def register_guide(self, number: str, user_phone: str, user_name: str) -> bool:
-        """Registra una guía recibida.
+    def register_guide(self, number: str, user_phone: str, user_name: str, business_id: int) -> bool:
+        """Registra una guía recibida, asociada a su business.
 
         Retorna True si la guía es nueva (hay que notificar) o si el
         backend no responde (fail-open); False si ya fue registrada.

@@ -20,6 +20,8 @@ pub struct AuthState {
 #[derive(Clone)]
 pub struct BusinessState {
     pub business_service: Arc<dyn BusinessServiceTrait>,
+    /// Para las estadísticas del dashboard (notificaciones de guías).
+    pub guide_service: Arc<dyn GuideServiceTrait>,
     pub global_state: Arc<AppState>,
 }
 
