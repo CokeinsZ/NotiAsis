@@ -43,6 +43,7 @@ fn build_app(pool: sqlx::PgPool, meta_client: Arc<dyn MetaClientTrait>, jwt_secr
         chat_repository.clone(),
         user_repository.clone(),
         meta_client,
+        Arc::new(messages::service::FfmpegVoiceTranscoder::new()),
     ));
     let guide_service = Arc::new(guides::service::GuideService::new(
         guide_repository,

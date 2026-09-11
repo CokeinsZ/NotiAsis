@@ -15,7 +15,9 @@ pub trait MetaClientTrait: Send + Sync {
     async fn upload_media(&self, bytes: Vec<u8>, filename: &str, mime: &str) -> Result<String, String>;
 
     /// Envía un mensaje multimedia libre referenciando un media_id ya
-    /// subido. Retorna el meta_message_id asignado por Meta.
+    /// subido. `voice` solo aplica a Audio: true lo envía como nota de
+    /// voz nativa (burbuja PTT, exige .ogg OPUS mono). Retorna el
+    /// meta_message_id asignado por Meta.
     async fn send_media_message(
         &self,
         to_number: &str,
@@ -23,6 +25,7 @@ pub trait MetaClientTrait: Send + Sync {
         kind: crate::messages::dtos::MediaType,
         caption: Option<&str>,
         filename: Option<&str>,
+        voice: bool,
     ) -> Result<String, String>;
 
     /// Descarga un archivo multimedia de Meta en memoria.
@@ -64,12 +67,15 @@ pub fn build_text_message_payload(to_number: &str, text: &str) -> serde_json::Va
 
 /// Payload para mensajes multimedia libres (imagen/video/audio/documento).
 /// `kind` debe ser Image, Video, Audio o Document (nunca Text).
+/// `voice` solo aplica a Audio: true lo marca como nota de voz nativa
+/// (Meta exige entonces .ogg con códec OPUS, mono).
 pub fn build_media_message_payload(
     to_number: &str,
     media_id: &str,
     kind: crate::messages::dtos::MediaType,
     caption: Option<&str>,
     filename: Option<&str>,
+    voice: bool,
 ) -> serde_json::Value {
     use crate::messages::dtos::MediaType;
     let to = to_number.trim_start_matches('+');
@@ -103,7 +109,11 @@ pub fn build_media_message_payload(
         MediaType::Audio => {
             let mut payload = base;
             payload["type"] = serde_json::Value::String("audio".into());
-            payload["audio"] = serde_json::json!({ "id": media_id });
+            let mut audio = serde_json::json!({ "id": media_id });
+            if voice {
+                audio["voice"] = serde_json::Value::Bool(true);
+            }
+            payload["audio"] = audio;
             payload
         }
         MediaType::Document => {
@@ -192,13 +202,14 @@ impl MetaClientTrait for MetaClient {
         kind: crate::messages::dtos::MediaType,
         caption: Option<&str>,
         filename: Option<&str>,
+        voice: bool,
     ) -> Result<String, String> {
         let url = format!("{}/{}/messages", self.graph_api_url, self.phone_number_id);
 
         let response = self.http
             .post(&url)
             .bearer_auth(&self.access_token)
-            .json(&build_media_message_payload(to_number, media_id, kind, caption, filename))
+            .json(&build_media_message_payload(to_number, media_id, kind, caption, filename, voice))
             .send()
             .await
             .map_err(|e| e.to_string())?;
@@ -276,7 +287,7 @@ mod tests {
 
     #[test]
     fn image_payload_includes_caption() {
-        let payload = build_media_message_payload("573003579384", "mid.123", MediaType::Image, Some("mira"), None);
+        let payload = build_media_message_payload("573003579384", "mid.123", MediaType::Image, Some("mira"), None, false);
         assert_eq!(payload["type"], "image");
         assert_eq!(payload["image"]["id"], "mid.123");
         assert_eq!(payload["image"]["caption"], "mira");
@@ -284,7 +295,7 @@ mod tests {
 
     #[test]
     fn video_payload_includes_caption() {
-        let payload = build_media_message_payload("+573003579384", "mid.456", MediaType::Video, Some("video"), None);
+        let payload = build_media_message_payload("+573003579384", "mid.456", MediaType::Video, Some("video"), None, false);
         assert_eq!(payload["to"], "573003579384");
         assert_eq!(payload["type"], "video");
         assert_eq!(payload["video"]["id"], "mid.456");
@@ -293,10 +304,19 @@ mod tests {
 
     #[test]
     fn audio_payload_has_no_caption() {
-        let payload = build_media_message_payload("573003579384", "mid.789", MediaType::Audio, Some("ignorado"), None);
+        let payload = build_media_message_payload("573003579384", "mid.789", MediaType::Audio, Some("ignorado"), None, false);
         assert_eq!(payload["type"], "audio");
         assert_eq!(payload["audio"]["id"], "mid.789");
         assert!(payload.get("caption").is_none());
+        assert!(payload["audio"].get("voice").is_none());
+    }
+
+    #[test]
+    fn voice_payload_sets_voice_flag() {
+        let payload = build_media_message_payload("573003579384", "mid.voice", MediaType::Audio, None, None, true);
+        assert_eq!(payload["type"], "audio");
+        assert_eq!(payload["audio"]["id"], "mid.voice");
+        assert_eq!(payload["audio"]["voice"], true);
     }
 
     #[test]
@@ -307,6 +327,7 @@ mod tests {
             MediaType::Document,
             Some("factura"),
             Some("factura.pdf"),
+            false,
         );
         assert_eq!(payload["type"], "document");
         assert_eq!(payload["document"]["id"], "mid.doc");

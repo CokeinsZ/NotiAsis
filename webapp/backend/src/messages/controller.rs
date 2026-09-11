@@ -193,6 +193,7 @@ mod tests {
             _: String,
             _: String,
             _: Vec<u8>,
+            _: bool,
         ) -> Result<Message, String> {
             Err("not implemented in fake".to_string())
         }

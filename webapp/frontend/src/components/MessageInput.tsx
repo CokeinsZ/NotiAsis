@@ -233,7 +233,10 @@ export default function MessageInput({ businessId, userPhone, windowOpen, onSent
         await sendChatMedia(businessId, userPhone, selectedFile, selectedKind, text.trim() || undefined, selectedFile.name);
       } else if (hasRecording && recordedBlob) {
         const ext = recordedMime.includes("mp4") ? "m4a" : recordedMime.includes("ogg") ? "ogg" : "webm";
-        await sendChatMedia(businessId, userPhone, recordedBlob, "audio", undefined, `audio.${ext}`);
+        // Las grabaciones se envían como nota de voz: el backend las
+        // convierte a OGG/Opus mono (lo único que las apps nativas
+        // reproducen como PTT) y las manda con voice:true.
+        await sendChatMedia(businessId, userPhone, recordedBlob, "audio", undefined, `audio.${ext}`, { voice: true });
       } else {
         await sendChatMessage(businessId, userPhone, text.trim());
       }

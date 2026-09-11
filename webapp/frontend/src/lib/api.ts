@@ -188,6 +188,8 @@ export type SendableMediaType = "image" | "video" | "audio" | "document";
  * Envía un mensaje multimedia libre (imagen/video/audio/documento) dentro
  * de la ventana de 24h. El archivo viaja como multipart/form-data al
  * backend, que lo sube a Meta en memoria sin guardarlo en disco.
+ * `voice=true` solo para audios grabados: el backend los convierte a
+ * OGG/Opus mono con ffmpeg y los envía como nota de voz nativa.
  */
 export async function sendChatMedia(
   businessId: number,
@@ -196,12 +198,16 @@ export async function sendChatMedia(
   mediaType: SendableMediaType,
   caption?: string,
   filename?: string,
+  opts?: { voice?: boolean },
 ): Promise<Message> {
   const token = getToken();
   const form = new FormData();
   form.append("media_type", mediaType);
   if (caption?.trim()) {
     form.append("caption", caption.trim().slice(0, 1024));
+  }
+  if (opts?.voice && mediaType === "audio") {
+    form.append("voice", "true");
   }
   form.append("file", file, filename || defaultMediaFilename(mediaType, file.type));
 

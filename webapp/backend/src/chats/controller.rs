@@ -112,8 +112,10 @@ async fn send_chat_message(
 
 /// Envío de mensaje multimedia libre dentro de la ventana de 24h.
 /// Recibe multipart/form-data con `file`, `media_type`
-/// (image|video|audio|document) y `caption` opcional. Sube el archivo a
-/// Meta en memoria (sin tocar disco) y envía el mensaje.
+/// (image|video|audio|document), `caption` opcional y `voice` opcional
+/// ("true" para notas de voz grabadas: se convierten a OGG/Opus y se
+/// envían con voice:true). Sube el archivo a Meta en memoria (sin tocar
+/// disco salvo temporales de transcodificación) y envía el mensaje.
 /// También renueva el token como el envío de texto.
 async fn send_chat_media_message(
     claims: AuthenticatedClaims,
@@ -127,6 +129,7 @@ async fn send_chat_media_message(
 
     let mut media_type_raw: Option<String> = None;
     let mut caption_raw: Option<String> = None;
+    let mut voice_raw: Option<String> = None;
     let mut file_bytes: Option<Vec<u8>> = None;
     let mut file_name: Option<String> = None;
     let mut file_mime: Option<String> = None;
@@ -142,6 +145,11 @@ async fn send_chat_media_message(
             "caption" => {
                 if let Ok(text) = field.text().await {
                     caption_raw = Some(text);
+                }
+            }
+            "voice" => {
+                if let Ok(text) = field.text().await {
+                    voice_raw = Some(text);
                 }
             }
             "file" => {
@@ -174,6 +182,14 @@ async fn send_chat_media_message(
         }
     };
 
+    let is_voice = matches!(voice_raw.as_deref().map(str::trim).map(str::to_lowercase).as_deref(), Some("true") | Some("1") | Some("yes"));
+    if is_voice && media_type != MediaType::Audio {
+        return json_response(
+            StatusCode::BAD_REQUEST,
+            serde_json::json!({ "message": "Voice messages must be audio" }),
+        );
+    }
+
     let bytes = match file_bytes {
         Some(b) if !b.is_empty() => b,
         _ => {
@@ -202,7 +218,7 @@ async fn send_chat_media_message(
 
     match state
         .message_service
-        .send_free_media_message(business_id, &user_phone, media_type, caption, filename, mime, bytes)
+        .send_free_media_message(business_id, &user_phone, media_type, caption, filename, mime, bytes, is_voice)
         .await
     {
         Ok(message) => {
@@ -224,6 +240,7 @@ async fn send_chat_media_message(
             let status = match e.as_str() {
                 "Chat not found" => StatusCode::NOT_FOUND,
                 e if e.contains("window is closed") => StatusCode::UNPROCESSABLE_ENTITY,
+                e if e.contains("ffmpeg") || e.contains("procesar el audio") || e.contains("conversión") || e.contains("Meta") => StatusCode::BAD_GATEWAY,
                 e if e.contains("supera los") || e.contains("no soportado") || e.contains("vacío") || e.contains("1024") => StatusCode::BAD_REQUEST,
                 _ => StatusCode::BAD_REQUEST,
             };
@@ -378,9 +395,13 @@ mod tests {
             _filename: String,
             _mime: String,
             bytes: Vec<u8>,
+            is_voice: bool,
         ) -> Result<Message, String> {
             if bytes.is_empty() {
                 return Err("El archivo está vacío.".to_string());
+            }
+            if is_voice && media_type != crate::messages::dtos::MediaType::Audio {
+                return Err("Voice messages must be audio".to_string());
             }
             Ok(Message {
                 id: 2,
@@ -696,5 +717,64 @@ mod tests {
         assert_eq!(default_filename(MediaType::Video, "video/mp4"), "video.mp4");
         assert_eq!(default_filename(MediaType::Audio, "audio/ogg"), "audio.ogg");
         assert_eq!(default_filename(MediaType::Document, "application/pdf"), "documento.pdf");
+    }
+
+    #[tokio::test]
+    async fn send_voice_note_returns_201() {
+        let boundary = "voiceboundary123";
+        let (content_type, body) = multipart_body(
+            boundary,
+            vec![
+                ("media_type", None, Some("audio".to_string())),
+                ("voice", None, Some("true".to_string())),
+                ("file", Some(("audio.webm", "audio/webm", b"fake-webm-bytes".to_vec())), None),
+            ],
+        );
+
+        let response = create_routes()
+            .oneshot(
+                Request::builder()
+                    .uri("/7/573003579384/messages/media")
+                    .method("POST")
+                    .header("Authorization", "Bearer valido")
+                    .header("Content-Type", content_type)
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::CREATED);
+        let body_bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let body_json: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
+        assert_eq!(body_json["data"]["media_type"], "audio");
+    }
+
+    #[tokio::test]
+    async fn send_voice_flag_with_non_audio_returns_400() {
+        let boundary = "voiceboundary456";
+        let (content_type, body) = multipart_body(
+            boundary,
+            vec![
+                ("media_type", None, Some("image".to_string())),
+                ("voice", None, Some("true".to_string())),
+                ("file", Some(("foto.jpg", "image/jpeg", b"bytes".to_vec())), None),
+            ],
+        );
+
+        let response = create_routes()
+            .oneshot(
+                Request::builder()
+                    .uri("/7/573003579384/messages/media")
+                    .method("POST")
+                    .header("Authorization", "Bearer valido")
+                    .header("Content-Type", content_type)
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     }
 }
