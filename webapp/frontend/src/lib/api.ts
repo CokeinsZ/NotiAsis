@@ -91,12 +91,29 @@ export async function getChatMessages(businessId: number, userPhone: string): Pr
   return data.data;
 }
 
+export interface NotificationStatsOptions {
+  days?: number;
+  startDate?: string;
+  endDate?: string;
+}
+
 export async function getNotificationStats(
   businessId: number,
-  days: number,
+  options?: number | NotificationStatsOptions,
 ): Promise<NotificationStatRow[]> {
+  const params = new URLSearchParams();
+
+  if (typeof options === "number") {
+    params.set("days", options.toString());
+  } else if (options) {
+    if (options.startDate) params.set("start_date", options.startDate);
+    if (options.endDate) params.set("end_date", options.endDate);
+    if (options.days && !options.startDate) params.set("days", options.days.toString());
+  }
+
+  const queryStr = params.toString() ? `?${params.toString()}` : "";
   const data = await request<{ stats: NotificationStatRow[] }>(
-    `/businesses/${businessId}/stats/notifications?days=${days}`,
+    `/businesses/${businessId}/stats/notifications${queryStr}`,
   );
   return data.stats;
 }

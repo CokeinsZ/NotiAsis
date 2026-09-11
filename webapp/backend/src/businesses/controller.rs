@@ -146,7 +146,7 @@ async fn get_notification_stats(
         return response;
     }
 
-    match state.guide_service.get_notification_stats(business_id, filters.days).await {
+    match state.guide_service.get_notification_stats(business_id, filters.days, filters.start_date, filters.end_date).await {
         Ok(stats) => json_response(
             StatusCode::OK,
             serde_json::json!({
@@ -165,6 +165,8 @@ async fn get_notification_stats(
 #[derive(Debug, serde::Deserialize)]
 pub struct NotificationStatsFiltersQuery {
     pub days: Option<i32>,
+    pub start_date: Option<chrono::NaiveDate>,
+    pub end_date: Option<chrono::NaiveDate>,
 }
 
 /// Configuración del Google Sheet de usuarios a notificar de un business.

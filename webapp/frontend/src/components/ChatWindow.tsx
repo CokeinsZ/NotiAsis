@@ -57,7 +57,7 @@ export default function ChatWindow({ businessId, chat }: Props) {
       </header>
 
       {/* Historial de mensajes */}
-      <div className="flex-1 space-y-2 overflow-y-auto px-5 py-4">
+      <div className="flex-1 space-y-2 overflow-y-auto px-5 pt-8 pb-4">
         {messages.map((message) => (
           <MessageBubble key={message.id} message={message} />
         ))}

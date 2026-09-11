@@ -13,7 +13,13 @@ pub trait GuideRepositoryTrait: Send + Sync {
     /// Marca cuándo se notificó la guía por última vez.
     async fn mark_notified(&self, number: &str, timestamp: NaiveDateTime) -> Result<bool, String>;
     /// Notificaciones por día y tipo para el dashboard del business.
-    async fn get_notification_stats(&self, business_id: i32, days: i32) -> Result<Vec<DailyNotificationStat>, String>;
+    async fn get_notification_stats(
+        &self,
+        business_id: i32,
+        days: Option<i32>,
+        start_date: Option<chrono::NaiveDate>,
+        end_date: Option<chrono::NaiveDate>,
+    ) -> Result<Vec<DailyNotificationStat>, String>;
 }
 
 pub struct PostgresGuideRepository {
@@ -78,10 +84,16 @@ impl GuideRepositoryTrait for PostgresGuideRepository {
 
     async fn mark_notified(&self, number: &str, timestamp: NaiveDateTime) -> Result<bool, String> {
         let query = r#"
-            UPDATE guides
-            SET last_notification_timestamp = $2::timestamp,
-                notification_count = notification_count + 1
-            WHERE number = $1
+            WITH updated AS (
+                UPDATE guides
+                SET last_notification_timestamp = $2::timestamp,
+                    notification_count = notification_count + 1
+                WHERE number = $1
+                RETURNING number, business_id, user_id, notification_count, last_notification_timestamp
+            )
+            INSERT INTO guide_notifications (guide_number, business_id, user_id, notification_step, created_at)
+            SELECT number, business_id, user_id, notification_count, last_notification_timestamp
+            FROM updated
         "#;
 
         let result = sqlx::query(query)
@@ -94,23 +106,41 @@ impl GuideRepositoryTrait for PostgresGuideRepository {
         Ok(result.rows_affected() > 0)
     }
 
-    async fn get_notification_stats(&self, business_id: i32, days: i32) -> Result<Vec<DailyNotificationStat>, String> {
-        let query = r#"
-            SELECT
-                last_notification_timestamp::date AS day,
-                notification_count,
+    async fn get_notification_stats(
+        &self,
+        business_id: i32,
+        days: Option<i32>,
+        start_date: Option<chrono::NaiveDate>,
+        end_date: Option<chrono::NaiveDate>,
+    ) -> Result<Vec<DailyNotificationStat>, String> {
+        let mut query = sqlx::QueryBuilder::new(
+            r#"SELECT
+                created_at::date AS day,
+                notification_step AS notification_count,
                 COUNT(*) AS total
-            FROM guides
-            WHERE business_id = $1
-              AND last_notification_timestamp IS NOT NULL
-              AND last_notification_timestamp::date >= CURRENT_DATE - $2
-            GROUP BY day, notification_count
-            ORDER BY day, notification_count
-        "#;
+            FROM guide_notifications
+            WHERE business_id = "#,
+        );
+        query.push_bind(business_id);
 
-        sqlx::query_as::<_, DailyNotificationStat>(query)
-            .bind(business_id)
-            .bind(days)
+        if let Some(start) = start_date {
+            query.push(" AND created_at::date >= ");
+            query.push_bind(start);
+        } else if let Some(d) = days {
+            query.push(" AND created_at::date >= CURRENT_DATE - ");
+            query.push_bind(d);
+        } else {
+            query.push(" AND created_at::date >= CURRENT_DATE - 30");
+        }
+
+        if let Some(end) = end_date {
+            query.push(" AND created_at::date <= ");
+            query.push_bind(end);
+        }
+
+        query.push(" GROUP BY day, notification_step ORDER BY day, notification_step");
+
+        query.build_query_as::<DailyNotificationStat>()
             .fetch_all(&self.db_pool)
             .await
             .map_err(|e| e.to_string())

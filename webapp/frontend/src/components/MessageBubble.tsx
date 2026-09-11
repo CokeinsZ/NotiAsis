@@ -1,5 +1,5 @@
 import type { Message } from "@/lib/types";
-import { formatMessageTime } from "@/lib/time";
+import { formatFullDateTime, formatMessageTime } from "@/lib/time";
 import MediaAttachment from "./MediaAttachment";
 
 function StatusTicks({ status }: { status: Message["status"] }) {
@@ -59,7 +59,17 @@ export default function MessageBubble({ message }: { message: Message }) {
           <MessageContent message={message} />
         </p>
         <div className="mt-1 flex items-center justify-end gap-1 text-[10px] text-neutral-500">
-          <span>{formatMessageTime(message.created_at)}</span>
+          <div className="group/time relative inline-flex items-center">
+            <span
+              title={formatFullDateTime(message.created_at)}
+              className="cursor-pointer underline decoration-neutral-700 decoration-dotted transition-colors hover:text-moon hover:decoration-moon"
+            >
+              {formatMessageTime(message.created_at)}
+            </span>
+            <div className="pointer-events-none absolute bottom-full right-0 z-50 mb-1.5 hidden whitespace-nowrap rounded border border-moon/40 bg-black/95 px-2.5 py-1 text-[11px] font-normal text-white shadow-xl backdrop-blur group-hover/time:flex">
+              {formatFullDateTime(message.created_at)}
+            </div>
+          </div>
           {!fromUser && <StatusTicks status={message.status} />}
         </div>
       </div>

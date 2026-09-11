@@ -134,6 +134,27 @@ CREATE TABLE IF NOT EXISTS api_keys (
 	created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
+CREATE TABLE IF NOT EXISTS guide_notifications (
+	id SERIAL PRIMARY KEY,
+	guide_number VARCHAR(20),
+	business_id INT NOT NULL,
+	user_id VARCHAR(20) NOT NULL,
+	notification_step INT NOT NULL,
+	created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+
+	FOREIGN KEY (guide_number) REFERENCES guides(number) 
+		ON DELETE SET NULL
+		ON UPDATE CASCADE,
+	FOREIGN KEY (business_id) REFERENCES businesses(id) 
+		ON DELETE CASCADE
+		ON UPDATE CASCADE,
+	FOREIGN KEY (user_id) REFERENCES users(phone_number) 
+		ON DELETE CASCADE
+		ON UPDATE CASCADE
+);
+
 CREATE INDEX IF NOT EXISTS idx_messages_chat_time ON messages (business_id, user_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_messages_meta_id ON messages (meta_message_id);
 CREATE INDEX IF NOT EXISTS idx_chats_business_activity ON chats (business_id, last_user_message_timestamp DESC);
+CREATE INDEX IF NOT EXISTS idx_guide_notifications_business_date ON guide_notifications (business_id, (created_at::date));
+CREATE INDEX IF NOT EXISTS idx_guide_notifications_guide ON guide_notifications (guide_number);

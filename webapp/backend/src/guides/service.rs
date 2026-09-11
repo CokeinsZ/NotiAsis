@@ -19,7 +19,13 @@ pub trait GuideServiceTrait: Send + Sync {
     async fn get_guide(&self, number: &str) -> Result<Guide, String>;
     async fn mark_notified(&self, number: &str) -> Result<(), String>;
     /// Estadísticas de notificaciones por día y tipo para el dashboard.
-    async fn get_notification_stats(&self, business_id: i32, days: Option<i32>) -> Result<Vec<DailyNotificationStat>, String>;
+    async fn get_notification_stats(
+        &self,
+        business_id: i32,
+        days: Option<i32>,
+        start_date: Option<chrono::NaiveDate>,
+        end_date: Option<chrono::NaiveDate>,
+    ) -> Result<Vec<DailyNotificationStat>, String>;
 }
 
 pub struct GuideService {
@@ -70,9 +76,15 @@ impl GuideServiceTrait for GuideService {
         }
     }
 
-    async fn get_notification_stats(&self, business_id: i32, days: Option<i32>) -> Result<Vec<DailyNotificationStat>, String> {
+    async fn get_notification_stats(
+        &self,
+        business_id: i32,
+        days: Option<i32>,
+        start_date: Option<chrono::NaiveDate>,
+        end_date: Option<chrono::NaiveDate>,
+    ) -> Result<Vec<DailyNotificationStat>, String> {
         self.guide_repository
-            .get_notification_stats(business_id, days.unwrap_or(30))
+            .get_notification_stats(business_id, days, start_date, end_date)
             .await
     }
 
@@ -190,7 +202,13 @@ mod tests {
             }
         }
 
-        async fn get_notification_stats(&self, _: i32, _: i32) -> Result<Vec<DailyNotificationStat>, String> {
+        async fn get_notification_stats(
+            &self,
+            _: i32,
+            _: Option<i32>,
+            _: Option<chrono::NaiveDate>,
+            _: Option<chrono::NaiveDate>,
+        ) -> Result<Vec<DailyNotificationStat>, String> {
             Ok(Vec::new())
         }
     }

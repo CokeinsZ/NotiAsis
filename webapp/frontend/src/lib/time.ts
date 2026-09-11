@@ -53,3 +53,40 @@ export function formatMessageDay(timestamp: string): string {
     month: "short",
   });
 }
+
+/**
+ * Formatea una fecha "YYYY-MM-DD" en español completo:
+ * "Viernes, 28 de agosto de 2026"
+ */
+export function formatDayDateString(dateStr: string): string {
+  const [y, m, d] = dateStr.split("-").map(Number);
+  const date = new Date(y, m - 1, d);
+  const formatted = date.toLocaleDateString("es-CO", {
+    weekday: "long",
+    day: "numeric",
+    month: "long",
+    year: "numeric",
+  });
+  return formatted.charAt(0).toUpperCase() + formatted.slice(1);
+}
+
+/**
+ * Fecha y hora completa en español para tooltips y hover de mensajes.
+ * Ej: "Lunes, 24 de agosto de 2026, 02:33 p. m."
+ */
+export function formatFullDateTime(timestamp: string): string {
+  const date = parseUtc(timestamp);
+  const formattedDate = date.toLocaleDateString("es-CO", {
+    weekday: "long",
+    day: "numeric",
+    month: "long",
+    year: "numeric",
+  });
+  const formattedTime = date.toLocaleTimeString("es-CO", {
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: true,
+  });
+  const capitalized = formattedDate.charAt(0).toUpperCase() + formattedDate.slice(1);
+  return `${capitalized}, ${formattedTime}`;
+}
