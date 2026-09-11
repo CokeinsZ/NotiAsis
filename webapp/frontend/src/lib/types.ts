@@ -18,7 +18,7 @@ export interface ChatSummary {
   window_open: boolean;
 }
 
-export type MediaType = "text" | "document" | "audio" | "image";
+export type MediaType = "text" | "document" | "audio" | "image" | "video";
 export type MessageStatus = "sent" | "delivered" | "read";
 
 /** Fila cruda del backend: notificaciones por día y notification_count. */

@@ -13,6 +13,7 @@ interface Props {
 const LABELS: Record<string, string> = {
   document: "Ver documento",
   image: "Ver imagen",
+  video: "Ver video",
   audio: "Cargar audio",
 };
 
@@ -79,6 +80,13 @@ export default function MediaAttachment({ mediaId, mediaType, caption }: Props) 
     return (
       // eslint-disable-next-line jsx-a11y/media-has-caption
       <audio controls src={blobUrl} className="mt-1 h-9 max-w-full" />
+    );
+  }
+
+  if (mediaType === "video") {
+    return (
+      // eslint-disable-next-line jsx-a11y/media-has-caption
+      <video controls src={blobUrl} className="mt-1 max-h-64 max-w-xs rounded border border-moon/30" />
     );
   }
 

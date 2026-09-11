@@ -36,6 +36,103 @@ fn message_preview(media_type: MediaType, message: &Option<String>) -> String {
         (MediaType::Audio, _) => "[audio]".to_string(),
         (MediaType::Image, Some(caption)) => format!("[imagen] {caption}"),
         (MediaType::Image, None) => "[imagen]".to_string(),
+        (MediaType::Video, Some(caption)) => format!("[video] {caption}"),
+        (MediaType::Video, None) => "[video]".to_string(),
+    }
+}
+
+/// Límites de tamaño aceptados en memoria para envíos multimedia
+/// (alineados con los límites de la WhatsApp Cloud API).
+pub const MAX_IMAGE_BYTES: usize = 5 * 1024 * 1024;
+pub const MAX_VIDEO_BYTES: usize = 16 * 1024 * 1024;
+pub const MAX_AUDIO_BYTES: usize = 16 * 1024 * 1024;
+pub const MAX_DOCUMENT_BYTES: usize = 25 * 1024 * 1024;
+
+/// Valida mime y tamaño según el tipo de medio. Función pura para probarla.
+pub fn validate_media_upload(media_type: MediaType, mime: &str, size: usize) -> Result<(), String> {
+    let mime = mime.to_lowercase();
+    match media_type {
+        MediaType::Text => Err("Text messages do not use media upload".to_string()),
+        MediaType::Image => {
+            if !(mime == "image/jpeg" || mime == "image/png" || mime == "image/webp") {
+                return Err("Formato de imagen no soportado. Usa JPG, PNG o WEBP.".to_string());
+            }
+            if size == 0 {
+                return Err("El archivo está vacío.".to_string());
+            }
+            if size > MAX_IMAGE_BYTES {
+                return Err("La imagen supera los 5MB permitidos.".to_string());
+            }
+            Ok(())
+        }
+        MediaType::Video => {
+            if !(mime == "video/mp4" || mime == "video/3gpp" || mime == "video/3gpp2" || mime == "video/quicktime") {
+                return Err("Formato de video no soportado. Usa MP4.".to_string());
+            }
+            if size == 0 {
+                return Err("El archivo está vacío.".to_string());
+            }
+            if size > MAX_VIDEO_BYTES {
+                return Err("El video supera los 16MB permitidos.".to_string());
+            }
+            Ok(())
+        }
+        MediaType::Audio => {
+            let ok = mime.starts_with("audio/")
+                || mime == "video/webm"
+                || mime == "application/ogg"
+                || mime == "application/octet-stream";
+            if !ok {
+                return Err("Formato de audio no soportado.".to_string());
+            }
+            if size == 0 {
+                return Err("El archivo está vacío.".to_string());
+            }
+            if size > MAX_AUDIO_BYTES {
+                return Err("El audio supera los 16MB permitidos.".to_string());
+            }
+            Ok(())
+        }
+        MediaType::Document => {
+            let ok = mime == "application/pdf"
+                || mime == "text/plain"
+                || mime == "text/csv"
+                || mime == "application/vnd.ms-excel"
+                || mime == "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                || mime == "application/msword"
+                || mime == "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+                || mime == "application/vnd.ms-powerpoint"
+                || mime == "application/vnd.openxmlformats-officedocument.presentationml.presentation"
+                || mime.starts_with("application/")
+                || mime.starts_with("text/");
+            if !ok {
+                return Err("Formato de documento no soportado.".to_string());
+            }
+            if size == 0 {
+                return Err("El archivo está vacío.".to_string());
+            }
+            if size > MAX_DOCUMENT_BYTES {
+                return Err("El documento supera los 25MB permitidos.".to_string());
+            }
+            Ok(())
+        }
+    }
+}
+
+/// Caption opcional para mensajes multimedia (límite de Meta: 1024).
+pub fn validate_media_caption(caption: Option<&str>) -> Result<Option<String>, String> {
+    match caption {
+        None => Ok(None),
+        Some(c) => {
+            let trimmed = c.trim();
+            if trimmed.is_empty() {
+                return Ok(None);
+            }
+            if trimmed.chars().count() > 1024 {
+                return Err("El texto adjunto no puede superar 1024 caracteres.".to_string());
+            }
+            Ok(Some(trimmed.to_string()))
+        }
     }
 }
 
@@ -43,6 +140,19 @@ fn message_preview(media_type: MediaType, message: &Option<String>) -> String {
 pub trait MessageServiceTrait: Send + Sync {
     async fn get_chat_messages(&self, business_id: i32, user_phone: &str) -> Result<Vec<Message>, String>;
     async fn send_free_message(&self, business_id: i32, user_phone: &str, dto: SendMessageDto) -> Result<Message, String>;
+    /// Envía un mensaje multimedia libre (imagen/video/audio/documento)
+    /// dentro de la ventana de 24h: sube el archivo a Meta y luego envía
+    /// el mensaje referenciando el media_id.
+    async fn send_free_media_message(
+        &self,
+        business_id: i32,
+        user_phone: &str,
+        media_type: MediaType,
+        caption: Option<String>,
+        filename: String,
+        mime: String,
+        bytes: Vec<u8>,
+    ) -> Result<Message, String>;
     async fn register_incoming(&self, dto: IncomingMessageDto) -> Result<Message, String>;
     async fn register_outgoing(&self, dto: OutgoingMessageDto) -> Result<Message, String>;
     async fn update_status(&self, meta_message_id: &str, status: MessageStatus) -> Result<(), String>;
@@ -103,6 +213,58 @@ impl MessageServiceTrait for MessageService {
             media_id: None,
             media_type: MediaType::Text,
             message: Some(dto.message),
+            status: Some(MessageStatus::Sent),
+            from_user: false,
+            created_at: None,
+        };
+
+        self.message_repository.save_message(&new_message).await
+    }
+
+    async fn send_free_media_message(
+        &self,
+        business_id: i32,
+        user_phone: &str,
+        media_type: MediaType,
+        caption: Option<String>,
+        filename: String,
+        mime: String,
+        bytes: Vec<u8>,
+    ) -> Result<Message, String> {
+        if media_type == MediaType::Text {
+            return Err("Use text endpoint for text messages".to_string());
+        }
+        validate_media_upload(media_type, &mime, bytes.len())?;
+        let caption = validate_media_caption(caption.as_deref())?;
+
+        let user_phone = &normalize_phone(user_phone);
+        let chat = self.chat_repository
+            .get_chat(business_id, user_phone)
+            .await?
+            .ok_or_else(|| "Chat not found".to_string())?;
+
+        let now = chrono::Utc::now().naive_utc();
+        if !is_window_open_at(chat.last_user_message_timestamp, now) {
+            return Err("Customer service window is closed (24h). Use a template message instead.".to_string());
+        }
+
+        // 1. Subir el archivo a Meta (en memoria, sin tocar disco).
+        let uploaded_media_id = self.meta_client
+            .upload_media(bytes, &filename, &mime)
+            .await?;
+
+        // 2. Enviar el mensaje multimedia referenciando el media_id.
+        let meta_message_id = self.meta_client
+            .send_media_message(user_phone, &uploaded_media_id, media_type, caption.as_deref(), Some(filename.as_str()))
+            .await?;
+
+        let new_message = NewMessage {
+            meta_message_id,
+            business_id,
+            user_id: user_phone.to_string(),
+            media_id: Some(uploaded_media_id),
+            media_type,
+            message: caption,
             status: Some(MessageStatus::Sent),
             from_user: false,
             created_at: None,
@@ -336,6 +498,8 @@ mod tests {
 
     struct FakeMetaClient {
         sent: Mutex<Vec<(String, String)>>,
+        uploaded: Mutex<Vec<(String, String)>>,
+        sent_media: Mutex<Vec<(String, String)>>,
     }
 
     #[async_trait]
@@ -343,6 +507,23 @@ mod tests {
         async fn send_text_message(&self, to_number: &str, text: &str) -> Result<String, String> {
             self.sent.lock().unwrap().push((to_number.to_string(), text.to_string()));
             Ok("wamid.fake".to_string())
+        }
+
+        async fn upload_media(&self, bytes: Vec<u8>, filename: &str, mime: &str) -> Result<String, String> {
+            self.uploaded.lock().unwrap().push((filename.to_string(), mime.to_string()));
+            Ok(format!("mid.{}", bytes.len()))
+        }
+
+        async fn send_media_message(
+            &self,
+            to_number: &str,
+            media_id: &str,
+            _kind: MediaType,
+            _caption: Option<&str>,
+            _filename: Option<&str>,
+        ) -> Result<String, String> {
+            self.sent_media.lock().unwrap().push((to_number.to_string(), media_id.to_string()));
+            Ok("wamid.fake-media".to_string())
         }
 
         async fn fetch_media(&self, _: &str) -> Result<(String, Vec<u8>), String> {
@@ -354,7 +535,7 @@ mod tests {
         let message_repo = Arc::new(FakeMessageRepository::new());
         let chat_repo = Arc::new(FakeChatRepository::with_chats(chats));
         let user_repo = Arc::new(FakeUserRepository);
-        let meta_client = Arc::new(FakeMetaClient { sent: Mutex::new(Vec::new()) });
+        let meta_client = Arc::new(FakeMetaClient { sent: Mutex::new(Vec::new()), uploaded: Mutex::new(Vec::new()), sent_media: Mutex::new(Vec::new()) });
         (
             MessageService::new(message_repo.clone(), chat_repo.clone(), user_repo, meta_client.clone()),
             message_repo,
@@ -525,5 +706,107 @@ mod tests {
         assert!(!message.from_user);
         assert_eq!(message.status, Some(MessageStatus::Sent));
         assert!(chat_repo.chats.lock().unwrap().iter().any(|c| c.business_id == 3 && c.user_id == "573003579384"));
+    }
+
+    // ---------- Tests de validación multimedia ----------
+
+    #[test]
+    fn media_validation_accepts_supported_types() {
+        assert!(validate_media_upload(MediaType::Image, "image/jpeg", 1024).is_ok());
+        assert!(validate_media_upload(MediaType::Video, "video/mp4", 1024).is_ok());
+        assert!(validate_media_upload(MediaType::Audio, "audio/webm", 1024).is_ok());
+        assert!(validate_media_upload(MediaType::Audio, "audio/ogg", 1024).is_ok());
+        assert!(validate_media_upload(MediaType::Document, "application/pdf", 1024).is_ok());
+        assert!(validate_media_upload(
+            MediaType::Document,
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            1024
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn media_validation_rejects_wrong_mime_and_oversize() {
+        assert!(validate_media_upload(MediaType::Image, "video/mp4", 100).is_err());
+        assert!(validate_media_upload(MediaType::Image, "image/jpeg", MAX_IMAGE_BYTES + 1).is_err());
+        assert!(validate_media_upload(MediaType::Video, "video/mp4", MAX_VIDEO_BYTES + 1).is_err());
+        assert!(validate_media_upload(MediaType::Audio, "audio/mpeg", MAX_AUDIO_BYTES + 1).is_err());
+        assert!(validate_media_upload(MediaType::Document, "application/pdf", 0).is_err());
+        assert!(validate_media_upload(MediaType::Text, "text/plain", 10).is_err());
+    }
+
+    #[test]
+    fn media_caption_trims_and_limits_length() {
+        assert_eq!(validate_media_caption(None).unwrap(), None);
+        assert_eq!(validate_media_caption(Some("   ")).unwrap(), None);
+        assert_eq!(
+            validate_media_caption(Some("  hola ")).unwrap(),
+            Some("hola".to_string())
+        );
+        assert!(validate_media_caption(Some(&"x".repeat(1025))).is_err());
+    }
+
+    // ---------- Tests de send_free_media_message ----------
+
+    #[tokio::test]
+    async fn send_media_without_chat_fails() {
+        let (service, _, _, meta) = build_service(Vec::new());
+        let result = service
+            .send_free_media_message(1, "573003579384", MediaType::Image, None, "foto.jpg".into(), "image/jpeg".into(), vec![1, 2, 3])
+            .await;
+        assert_eq!(result.unwrap_err(), "Chat not found");
+        assert!(meta.uploaded.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn send_media_with_closed_window_fails() {
+        let old = chrono::Utc::now().naive_utc() - Duration::hours(30);
+        let chats = vec![Chat { business_id: 1, user_id: "573003579384".into(), last_user_message_timestamp: Some(old), last_user_message: None, is_important: false, last_guide_notification_at: None }];
+        let (service, _, _, meta) = build_service(chats);
+        let result = service
+            .send_free_media_message(1, "573003579384", MediaType::Image, None, "foto.jpg".into(), "image/jpeg".into(), vec![1, 2])
+            .await;
+        assert!(result.unwrap_err().contains("window is closed"));
+        assert!(meta.uploaded.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn send_media_with_open_window_uploads_and_persists() {
+        let recent = chrono::Utc::now().naive_utc() - Duration::hours(1);
+        let chats = vec![Chat { business_id: 1, user_id: "573003579384".into(), last_user_message_timestamp: Some(recent), last_user_message: None, is_important: false, last_guide_notification_at: None }];
+        let (service, message_repo, _, meta) = build_service(chats);
+
+        let message = service
+            .send_free_media_message(
+                1,
+                "573003579384",
+                MediaType::Document,
+                Some("factura".into()),
+                "factura.pdf".into(),
+                "application/pdf".into(),
+                vec![1, 2, 3, 4],
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(message.meta_message_id, "wamid.fake-media");
+        assert_eq!(message.media_type, MediaType::Document);
+        assert_eq!(message.message, Some("factura".to_string()));
+        assert_eq!(meta.uploaded.lock().unwrap().len(), 1);
+        assert_eq!(meta.sent_media.lock().unwrap().len(), 1);
+        assert_eq!(message_repo.saved.lock().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn send_media_rejects_invalid_mime_without_calling_meta() {
+        let recent = chrono::Utc::now().naive_utc() - Duration::hours(1);
+        let chats = vec![Chat { business_id: 1, user_id: "573003579384".into(), last_user_message_timestamp: Some(recent), last_user_message: None, is_important: false, last_guide_notification_at: None }];
+        let (service, _, _, meta) = build_service(chats);
+
+        let result = service
+            .send_free_media_message(1, "573003579384", MediaType::Image, None, "video.mp4".into(), "video/mp4".into(), vec![1])
+            .await;
+        assert!(result.is_err());
+        assert!(meta.uploaded.lock().unwrap().is_empty());
     }
 }

@@ -40,6 +40,9 @@ function MessageContent({ message }: { message: Message }) {
   if (message.media_type === "image") {
     return <span className="italic">[Imagen] {message.message ?? ""}</span>;
   }
+  if (message.media_type === "video") {
+    return <span className="italic">[Video] {message.message ?? ""}</span>;
+  }
   return <span className="whitespace-pre-wrap">{message.message}</span>;
 }
 
