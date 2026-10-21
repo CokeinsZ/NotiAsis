@@ -15,6 +15,9 @@ class RustBackendClient(NotificationBackend):
     y deja continuar el flujo del bot (fail-open).
     """
 
+    # Máximo de guías por consulta a POST /guides/lookup (límite del backend).
+    LOOKUP_BATCH_SIZE = 500
+
     def __init__(self, base_url: str, api_key: str, timeout: int = 10) -> None:
         self._base_url = base_url.rstrip("/")
         self._api_key = api_key
@@ -72,22 +75,28 @@ class RustBackendClient(NotificationBackend):
             print(f"Error fetching authorized associates from backend: {e}")
             return {}
 
-    def register_guide(self, number: str, user_phone: str, user_name: str, business_id: int) -> bool:
+    def register_guide(
+        self,
+        number: str,
+        user_phone: str,
+        user_name: str,
+        business_id: int,
+        details: dict | None = None,
+    ) -> bool:
+        payload = {
+            "number": number,
+            "user_phone": normalize_phone(user_phone),
+            "user_name": user_name,
+            "business_id": business_id,
+        }
+        if details:
+            payload["details"] = details
         try:
-            response = self._request(
-                "POST",
-                "/guides",
-                json={
-                    "number": number,
-                    "user_phone": normalize_phone(user_phone),
-                    "user_name": user_name,
-                    "business_id": business_id,
-                },
-            )
+            response = self._request("POST", "/guides", json=payload)
             response.raise_for_status()
             created = bool(response.json().get("created", True))
             if not created:
-                print(f"Guide {number} was already registered, skipping notification.")
+                print(f"Guide {number} was already registered.")
             return created
         except Exception as e:
             print(f"Error registering guide {number} in backend: {e}")
@@ -102,6 +111,23 @@ class RustBackendClient(NotificationBackend):
             return response.json().get("guide")
         except Exception as e:
             print(f"Error fetching guide {number} from backend: {e}")
+            return None
+
+    def lookup_guides(self, numbers: list[str]) -> dict[str, dict] | None:
+        found: dict[str, dict] = {}
+        try:
+            for i in range(0, len(numbers), self.LOOKUP_BATCH_SIZE):
+                response = self._request(
+                    "POST",
+                    "/guides/lookup",
+                    json={"numbers": numbers[i:i + self.LOOKUP_BATCH_SIZE]},
+                )
+                response.raise_for_status()
+                for guide in response.json().get("guides", []):
+                    found[guide["number"]] = guide
+            return found
+        except Exception as e:
+            print(f"Error looking up {len(numbers)} guide(s) in backend: {e}")
             return None
 
     def get_business_sheet(self, business_id: int) -> dict | None:

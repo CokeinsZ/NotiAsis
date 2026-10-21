@@ -112,7 +112,34 @@ CREATE TABLE IF NOT EXISTS guides (
 	last_notification_timestamp TIMESTAMP,
 	notification_count INT NOT NULL DEFAULT 0,
 
-	FOREIGN KEY (user_id) REFERENCES users(phone_number) 
+	FOREIGN KEY (user_id) REFERENCES users(phone_number)
+		ON DELETE CASCADE
+		ON UPDATE CASCADE
+);
+
+-- Datos del pedido asociados a la guía (cliente y productos). Se guardan
+-- la primera vez que se notifica un pedido de Dropi para que los
+-- recordatorios no vuelvan a consultar el MCP (tiene rate limit).
+-- ALTER en vez de columnas en el CREATE para migrar bases existentes.
+ALTER TABLE guides ADD COLUMN IF NOT EXISTS order_id VARCHAR(32);
+ALTER TABLE guides ADD COLUMN IF NOT EXISTS customer_name VARCHAR(255);
+ALTER TABLE guides ADD COLUMN IF NOT EXISTS customer_document VARCHAR(32);
+ALTER TABLE guides ADD COLUMN IF NOT EXISTS delivery_address TEXT;
+ALTER TABLE guides ADD COLUMN IF NOT EXISTS city VARCHAR(128);
+ALTER TABLE guides ADD COLUMN IF NOT EXISTS shipping_company VARCHAR(128);
+ALTER TABLE guides ADD COLUMN IF NOT EXISTS order_total NUMERIC(14, 2);
+ALTER TABLE guides ADD COLUMN IF NOT EXISTS currency VARCHAR(8);
+
+CREATE TABLE IF NOT EXISTS guide_products (
+	id SERIAL PRIMARY KEY,
+	guide_number VARCHAR(20) NOT NULL,
+	product_id BIGINT,
+	product_name VARCHAR(512) NOT NULL,
+	quantity INT NOT NULL DEFAULT 1,
+	unit_price NUMERIC(14, 2),
+	subtotal NUMERIC(14, 2),
+
+	FOREIGN KEY (guide_number) REFERENCES guides(number)
 		ON DELETE CASCADE
 		ON UPDATE CASCADE
 );
@@ -158,3 +185,4 @@ CREATE INDEX IF NOT EXISTS idx_messages_chat_time ON messages (business_id, user
 CREATE INDEX IF NOT EXISTS idx_chats_business_activity ON chats (business_id, last_user_message_timestamp DESC);
 CREATE INDEX IF NOT EXISTS idx_guide_notifications_business_date ON guide_notifications (business_id, (created_at::date));
 CREATE INDEX IF NOT EXISTS idx_guide_notifications_guide ON guide_notifications (guide_number);
+CREATE INDEX IF NOT EXISTS idx_guide_products_guide ON guide_products (guide_number);

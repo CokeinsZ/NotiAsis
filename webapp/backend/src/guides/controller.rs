@@ -6,12 +6,15 @@ use axum::{
 };
 use validator::Validate;
 
-use crate::guides::dtos::{GuideFilters, RegisterGuideDto};
+use crate::auth::middleware::{AuthenticatedClaims, require_bot};
+use crate::guides::dtos::{GuideFilters, GuideLookupDto, RegisterGuideDto};
 use crate::state::GuideState;
 use crate::tools::responses::{build_validation_response, json_response};
 
 /// El bot registra aquí cada guía recibida. `created` indica si hay que
 /// notificar al usuario (false = guía duplicada, ya fue notificada).
+/// Si trae `details` (datos del pedido), se guardan aunque la guía ya
+/// existiera.
 async fn register_guide(
     State(state): State<GuideState>,
     Json(body): Json<RegisterGuideDto>,
@@ -82,6 +85,36 @@ async fn get_guide(
     }
 }
 
+/// El bot consulta en lote qué guías ya existen, cuántas veces se
+/// notificaron y los datos de pedido guardados (cliente y productos).
+/// Solo para el token del bot: expone datos personales de los clientes.
+async fn lookup_guides(
+    claims: AuthenticatedClaims,
+    State(state): State<GuideState>,
+    Json(body): Json<GuideLookupDto>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    if let Err(response) = require_bot(&claims.0) {
+        return response;
+    }
+    if let Err(errors) = body.validate() {
+        return build_validation_response(errors);
+    }
+
+    match state.guide_service.lookup_guides(body.numbers).await {
+        Ok(guides) => json_response(
+            StatusCode::OK,
+            serde_json::json!({
+                "message": "Guides retrieved",
+                "guides": guides
+            }),
+        ),
+        Err(e) => json_response(
+            StatusCode::BAD_REQUEST,
+            serde_json::json!({ "message": e }),
+        ),
+    }
+}
+
 /// El bot marca la guía como notificada tras enviar las plantillas.
 async fn mark_guide_notified(
     State(state): State<GuideState>,
@@ -104,6 +137,7 @@ async fn mark_guide_notified(
 pub fn guide_routes(state: GuideState) -> Router {
     Router::new()
         .route("/", post(register_guide).get(get_guides))
+        .route("/lookup", post(lookup_guides))
         .route("/{number}", get(get_guide))
         .route("/{number}/notified", post(mark_guide_notified))
         .with_state(state)

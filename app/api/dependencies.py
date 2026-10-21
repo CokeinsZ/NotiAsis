@@ -7,9 +7,13 @@ servicios que dependen de abstracciones.
 
 from functools import lru_cache
 
+from fastapi import HTTPException
+
 from app.config import Settings
 from app.services.associate_directory import AssociateDirectory
 from app.services.backend_client import RustBackendClient
+from app.services.dropi_client import N8nDropiClient
+from app.services.dropi_notifier import DropiNotificationService
 from app.services.google_sheets import GoogleSheetClient
 from app.services.pdf_extractor import PdfTextExtractor
 from app.services.recipient_extractor import DeepSeekRecipientExtractor
@@ -55,6 +59,26 @@ def get_sheet_notifier() -> SheetNotificationService:
         backend=get_backend_client(),
         message_sender=whatsapp_client,
         media_uploader=whatsapp_client,
+        debug_notification_number=settings.debug_notification_number,
+        notification_override_number=settings.notification_override_number,
+    )
+
+
+@lru_cache
+def get_dropi_notifier() -> DropiNotificationService:
+    settings = get_settings()
+    if settings.dropi_business_id is None:
+        # Sin business no hay a qué chats asociar los mensajes.
+        raise HTTPException(status_code=503, detail="DROPI_BUSINESS_ID no está configurado")
+
+    return DropiNotificationService(
+        order_source=N8nDropiClient(base_url=settings.dropi_n8n_url),
+        backend=get_backend_client(),
+        message_sender=WhatsAppClient(
+            access_token=settings.whatsapp_token,
+            phone_number_id=settings.whatsapp_phone_id,
+        ),
+        business_id=settings.dropi_business_id,
         debug_notification_number=settings.debug_notification_number,
         notification_override_number=settings.notification_override_number,
     )

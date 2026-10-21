@@ -13,6 +13,8 @@ services:
       - BACKEND_API_KEY=${BACKEND_API_KEY}
       - DEBUG_NOTIFICATION_NUMBER=${DEBUG_NOTIFICATION_NUMBER:-}
       - NOTIFICATION_OVERRIDE_NUMBER=${NOTIFICATION_OVERRIDE_NUMBER:-}
+      - DROPI_N8N_URL=${DROPI_N8N_URL:-}
+      - DROPI_BUSINESS_ID=${DROPI_BUSINESS_ID:-}
     depends_on:
       - backend
     restart: unless-stopped

@@ -46,10 +46,13 @@ app/
 │   ├── backend_client.py    # Cliente HTTP del backend Rust (NotificationBackend)
 │   ├── google_sheets.py     # Descarga de hojas de Google Sheets (polars)
 │   ├── sheet_notifier.py    # Notificación masiva desde el Google Sheet
+│   ├── dropi_client.py      # Cliente de los webhooks de N8N (MCP de Dropi)
+│   ├── dropi_notifier.py    # Notificación de pedidos de Dropi en oficina
 │   └── associate_directory.py  # Asociados autorizados en RAM (cargados del backend)
 └── api/
     ├── dependencies.py      # Composition root (inyección de dependencias)
     ├── notify_sheet.py      # POST /notify-sheet (notificación masiva)
+    ├── notify_dropi.py      # POST /notify-dropi-mcp (pedidos de Dropi)
     └── webhook.py           # Router FastAPI (GET/POST /webhook)
 tests/                       # Tests del bot (pytest, sin servicios externos)
 ```
@@ -126,6 +129,49 @@ el backend (`GET /businesses/{id}/sheet` → `business_users_sheet`):
      `Guia pdf`, lo sube a Meta (`POST /{phone_id}/media`) y envía las
      plantillas **guia** + **mensaje_guia_es**, registra la guía y los
      mensajes en el chat.
+
+### Notificación de pedidos de Dropi (MCP vía N8N)
+
+`POST /notify-dropi-mcp` (responde 202 y procesa en segundo plano). El
+body es opcional:
+
+| Campo | Por defecto |
+|---|---|
+| `from` | hace 15 días (`YYYY-MM-DD`) |
+| `until` | hoy |
+| `result_number` | 100 |
+| `start` | 0 |
+
+Requiere `DROPI_BUSINESS_ID` (el business dueño de los chats; sin él
+responde 503). `DROPI_N8N_URL` apunta a los webhooks de N8N
+(por defecto `https://n8n.notiasis.com/webhook/dropi`).
+
+1. Pagina `GET {DROPI_N8N_URL}/oficina` (body JSON con los filtros):
+   mientras `count == result_number` pide la siguiente página con
+   `start += count`.
+2. Consulta en lote al backend (`POST /guides/lookup`) qué guías
+   (`tracking_code`) ya existen, cuántas veces se notificaron y sus datos
+   de pedido guardados.
+3. Escalación **sin PDF**:
+
+   | Veces notificada | Se envía |
+   |---|---|
+   | 0 | `mensaje_guia_es` |
+   | 1 | `recordatorio` |
+   | 2 | `recordatorio_final` |
+   | 3 o más | nada |
+
+El MCP de Dropi tiene rate limit, así que el detalle del pedido
+(`GET {DROPI_N8N_URL}/orden?order_id=`) solo se consulta cuando faltan
+datos: la primera notificación de cada guía (o un `recordatorio_final`
+de una guía vieja registrada sin productos). Esos datos (cliente y
+productos) se guardan con la guía (`POST /guides` con `details`) y los
+recordatorios los leen del backend. Ante 429/5xx el cliente reintenta
+con espera exponencial.
+
+Migración: volver a correr `webapp/backend/db.sql` sobre la base
+existente (es idempotente) agrega las columnas de pedido a `guides` y la
+tabla `guide_products`.
 
 ## Agregar una nueva plantilla de WhatsApp
 
@@ -298,7 +344,8 @@ Para el bot (Python):
 | POST | `/messages/incoming` | Registrar mensaje entrante del webhook |
 | POST | `/messages/outgoing` | Registrar plantilla enviada |
 | PATCH | `/messages/{meta_message_id}/status` | Actualizar estado (`sent`/`delivered`/`read`) |
-| POST | `/guides` | Registrar guía; responde `created: false` si es duplicada (no re-notificar) |
+| POST | `/guides` | Registrar guía; responde `created: false` si es duplicada (no re-notificar). `details` opcional (cliente y productos del pedido) se guarda aunque la guía ya existiera |
+| POST | `/guides/lookup` | `{"numbers": [...]}` (máx. 500) → guías existentes con `notification_count`, `details` y `products`. Solo token del bot |
 | POST | `/guides/{number}/notified` | Marcar cuándo se notificó la guía |
 
 La sesión usa JWT en `localStorage` (15 min, renovado automáticamente al

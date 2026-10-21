@@ -8,6 +8,7 @@ implementaciones concretas (principio de inversión de dependencias).
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from datetime import date
 from typing import TYPE_CHECKING
 
 from app.models.shipping import RecipientInfo
@@ -62,6 +63,24 @@ class SheetSource(ABC):
         """Descarga un archivo público (ej. el PDF de la guía)."""
 
 
+class DropiOrderSource(ABC):
+    """Pedidos de Dropi, consultados a través de los webhooks de N8N
+    conectados a su MCP (que tiene rate limit)."""
+
+    @abstractmethod
+    def fetch_office_orders(
+        self, from_date: date, until_date: date, result_number: int, start: int
+    ) -> tuple[list[dict], int]:
+        """Una página de pedidos en "reclame en oficina": (items, count).
+
+        Lanza excepción si la consulta falla.
+        """
+
+    @abstractmethod
+    def fetch_order(self, order_id: str) -> dict | None:
+        """Detalle de un pedido (cliente y productos). None si falla."""
+
+
 class MediaUploader(ABC):
     """Subida de archivos multimedia al proveedor de mensajería."""
 
@@ -83,7 +102,8 @@ class NotificationBackend(ABC):
 
     Todas las operaciones son tolerantes a fallos: si el backend no
     responde, se registra el error y el flujo del bot continúa (fail-open),
-    salvo `register_guide`, cuya respuesta determina si se notifica o no.
+    salvo `register_guide`, cuya respuesta determina si se notifica o no,
+    y `lookup_guides`, que retorna None para que la corrida se detenga.
     """
 
     @abstractmethod
@@ -92,8 +112,18 @@ class NotificationBackend(ABC):
         autorizados a enviar guías. {} si el backend no responde."""
 
     @abstractmethod
-    def register_guide(self, number: str, user_phone: str, user_name: str, business_id: int) -> bool:
+    def register_guide(
+        self,
+        number: str,
+        user_phone: str,
+        user_name: str,
+        business_id: int,
+        details: dict | None = None,
+    ) -> bool:
         """Registra una guía recibida, asociada a su business.
+
+        `details` son los datos del pedido (cliente y productos); el
+        backend los guarda aunque la guía ya existiera.
 
         Retorna True si la guía es nueva (hay que notificar) o si el
         backend no responde (fail-open); False si ya fue registrada.
@@ -102,6 +132,12 @@ class NotificationBackend(ABC):
     @abstractmethod
     def get_guide(self, number: str) -> dict | None:
         """Consulta una guía por número. None si no existe o el backend falla."""
+
+    @abstractmethod
+    def lookup_guides(self, numbers: list[str]) -> dict[str, dict] | None:
+        """Guías existentes entre `numbers`, con sus datos de pedido
+        ({número: guía}). None si el backend falla: sin saber cuántas
+        veces se notificó cada guía no se puede decidir qué enviar."""
 
     @abstractmethod
     def get_business_sheet(self, business_id: int) -> dict | None:

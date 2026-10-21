@@ -20,6 +20,10 @@ class Settings:
     allowed_sender_numbers: frozenset
     debug_notification_number: str | None = None
     notification_override_number: str | None = None
+    # Webhooks de N8N conectados al MCP de Dropi (/oficina y /orden).
+    dropi_n8n_url: str = "https://n8n.notiasis.com/webhook/dropi"
+    # Business dueño de los pedidos de Dropi (chats e historial).
+    dropi_business_id: int | None = None
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -27,6 +31,7 @@ class Settings:
         allowed = frozenset(
             number.strip() for number in raw_allowed.split(",") if number.strip()
         )
+        raw_dropi_business = (os.getenv("DROPI_BUSINESS_ID") or "").strip()
         return cls(
             whatsapp_token=os.getenv("WHATSAPP_TOKEN", ""),
             whatsapp_phone_id=os.getenv("WHATSAPP_PHONE_ID", ""),
@@ -37,4 +42,6 @@ class Settings:
             allowed_sender_numbers=allowed,
             debug_notification_number=os.getenv("DEBUG_NOTIFICATION_NUMBER"),
             notification_override_number=os.getenv("NOTIFICATION_OVERRIDE_NUMBER"),
+            dropi_n8n_url=os.getenv("DROPI_N8N_URL") or cls.dropi_n8n_url,
+            dropi_business_id=int(raw_dropi_business) if raw_dropi_business.isdigit() else None,
         )

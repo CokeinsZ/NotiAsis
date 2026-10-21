@@ -3,7 +3,9 @@ use std::sync::Arc;
 use async_trait::async_trait;
 
 use crate::chats::repository::ChatRepositoryTrait;
-use crate::guides::dtos::{DailyNotificationStat, Guide, GuideRegistration, RegisterGuideDto};
+use crate::guides::dtos::{
+    DailyNotificationStat, Guide, GuideRegistration, GuideWithDetails, RegisterGuideDto,
+};
 use crate::guides::repository::GuideRepositoryTrait;
 use crate::tools::phones::normalize_phone;
 use crate::users::repository::UserRepositoryTrait;
@@ -14,6 +16,9 @@ pub trait GuideServiceTrait: Send + Sync {
     /// guía ya existía y no se debe volver a notificar al usuario.
     async fn register_guide(&self, dto: RegisterGuideDto) -> Result<GuideRegistration, String>;
     async fn get_guides(&self, user_phone: Option<String>) -> Result<Vec<Guide>, String>;
+    /// Guías existentes entre `numbers` con sus datos de pedido (el bot
+    /// las consulta en lote antes de notificar los pedidos de Dropi).
+    async fn lookup_guides(&self, numbers: Vec<String>) -> Result<Vec<GuideWithDetails>, String>;
     /// Consulta una guía puntual (el bot la usa para decidir entre
     /// notificación completa o recordatorio).
     async fn get_guide(&self, number: &str) -> Result<Guide, String>;
@@ -53,20 +58,41 @@ impl GuideServiceTrait for GuideService {
             .upsert_user(&user_phone, dto.user_name.as_deref().unwrap_or(""))
             .await?;
 
-        if let Some(guide) = self.guide_repository.insert_guide_if_new(&dto.number, &user_phone, dto.business_id).await? {
-            return Ok(GuideRegistration { guide, created: true });
+        let registration = match self.guide_repository.insert_guide_if_new(&dto.number, &user_phone, dto.business_id).await? {
+            Some(guide) => GuideRegistration { guide, created: true },
+            None => {
+                let existing = self.guide_repository
+                    .get_guide_by_number(&dto.number)
+                    .await?
+                    .ok_or_else(|| "Guide could not be registered".to_string())?;
+                GuideRegistration { guide: existing, created: false }
+            }
+        };
+
+        if let Some(details) = &dto.details {
+            self.guide_repository.save_details(&dto.number, details).await?;
         }
 
-        let existing = self.guide_repository
-            .get_guide_by_number(&dto.number)
-            .await?
-            .ok_or_else(|| "Guide could not be registered".to_string())?;
-
-        Ok(GuideRegistration { guide: existing, created: false })
+        Ok(registration)
     }
 
     async fn get_guides(&self, user_phone: Option<String>) -> Result<Vec<Guide>, String> {
         self.guide_repository.get_guides(user_phone.as_deref()).await
+    }
+
+    async fn lookup_guides(&self, numbers: Vec<String>) -> Result<Vec<GuideWithDetails>, String> {
+        let mut numbers: Vec<String> = numbers
+            .into_iter()
+            .map(|number| number.trim().to_string())
+            .filter(|number| !number.is_empty())
+            .collect();
+        numbers.sort();
+        numbers.dedup();
+
+        if numbers.is_empty() {
+            return Ok(Vec::new());
+        }
+        self.guide_repository.get_guides_with_details(&numbers).await
     }
 
     async fn get_guide(&self, number: &str) -> Result<Guide, String> {
@@ -112,12 +138,15 @@ impl GuideServiceTrait for GuideService {
 mod tests {
     use super::*;
     use crate::chats::repository::ChatRepositoryTrait;
+    use crate::guides::dtos::{GuideDetails, GuideDetailsDto, GuideProductDto};
     use crate::users::dtos::User;
     use chrono::NaiveDateTime;
     use std::sync::Mutex;
 
     struct FakeGuideRepository {
         guides: Mutex<Vec<Guide>>,
+        saved_details: Mutex<Vec<(String, GuideDetailsDto)>>,
+        lookups: Mutex<Vec<Vec<String>>>,
     }
 
     struct FakeChatRepository {
@@ -158,7 +187,11 @@ mod tests {
 
     impl FakeGuideRepository {
         fn new() -> Self {
-            Self { guides: Mutex::new(Vec::new()) }
+            Self {
+                guides: Mutex::new(Vec::new()),
+                saved_details: Mutex::new(Vec::new()),
+                lookups: Mutex::new(Vec::new()),
+            }
         }
     }
 
@@ -188,6 +221,26 @@ mod tests {
             Ok(self.guides.lock().unwrap().iter()
                 .filter(|g| user_phone.is_none() || Some(g.user_id.as_str()) == user_phone)
                 .cloned()
+                .collect())
+        }
+
+        async fn save_details(&self, number: &str, details: &GuideDetailsDto) -> Result<bool, String> {
+            if !self.guides.lock().unwrap().iter().any(|g| g.number == number) {
+                return Ok(false);
+            }
+            self.saved_details.lock().unwrap().push((number.to_string(), details.clone()));
+            Ok(true)
+        }
+
+        async fn get_guides_with_details(&self, numbers: &[String]) -> Result<Vec<GuideWithDetails>, String> {
+            self.lookups.lock().unwrap().push(numbers.to_vec());
+            Ok(self.guides.lock().unwrap().iter()
+                .filter(|g| numbers.contains(&g.number))
+                .map(|g| GuideWithDetails {
+                    guide: g.clone(),
+                    details: GuideDetails::default(),
+                    products: Vec::new(),
+                })
                 .collect())
         }
 
@@ -246,7 +299,85 @@ mod tests {
             user_phone: "573003579384".to_string(),
             user_name: Some("Stiven".to_string()),
             business_id: 1,
+            details: None,
         }
+    }
+
+    fn dropi_details() -> GuideDetailsDto {
+        GuideDetailsDto {
+            order_id: Some("93632719".into()),
+            customer_name: Some("Cesar Ochoa".into()),
+            delivery_address: Some("Oficina Interrapidisimo".into()),
+            city: Some("TARAZA".into()),
+            products: vec![GuideProductDto {
+                product_id: Some(2298431),
+                product_name: "Collar Girasol".into(),
+                quantity: 1,
+                unit_price: Some(24900.0),
+                subtotal: Some(84900.0),
+            }],
+            ..Default::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn register_with_details_saves_them() {
+        let (service, repository, _) = build_service();
+
+        let registration = service
+            .register_guide(RegisterGuideDto { details: Some(dropi_details()), ..dto("240063856178") })
+            .await
+            .unwrap();
+
+        assert!(registration.created);
+        let saved = repository.saved_details.lock().unwrap();
+        assert_eq!(saved.len(), 1);
+        assert_eq!(saved[0].0, "240063856178");
+        assert_eq!(saved[0].1.products[0].product_name, "Collar Girasol");
+    }
+
+    #[tokio::test]
+    async fn details_are_saved_even_if_guide_already_existed() {
+        // Guía registrada antes por el flujo de PDF/sheet: se completa.
+        let (service, repository, _) = build_service();
+        service.register_guide(dto("G1")).await.unwrap();
+
+        let registration = service
+            .register_guide(RegisterGuideDto { details: Some(dropi_details()), ..dto("G1") })
+            .await
+            .unwrap();
+
+        assert!(!registration.created);
+        assert_eq!(repository.saved_details.lock().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn register_without_details_does_not_touch_them() {
+        let (service, repository, _) = build_service();
+        service.register_guide(dto("G1")).await.unwrap();
+        assert!(repository.saved_details.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn lookup_trims_and_dedups_numbers() {
+        let (service, repository, _) = build_service();
+        service.register_guide(dto("G1")).await.unwrap();
+
+        let found = service
+            .lookup_guides(vec![" G1 ".into(), "G1".into(), "".into(), "G2".into()])
+            .await
+            .unwrap();
+
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].guide.number, "G1");
+        assert_eq!(repository.lookups.lock().unwrap()[0], vec!["G1".to_string(), "G2".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn lookup_with_only_blank_numbers_skips_the_query() {
+        let (service, repository, _) = build_service();
+        assert!(service.lookup_guides(vec!["  ".into()]).await.unwrap().is_empty());
+        assert!(repository.lookups.lock().unwrap().is_empty());
     }
 
     #[tokio::test]

@@ -1,7 +1,11 @@
+use std::collections::HashMap;
+
 use async_trait::async_trait;
 use chrono::NaiveDateTime;
 
-use crate::guides::dtos::{DailyNotificationStat, Guide};
+use crate::guides::dtos::{
+    DailyNotificationStat, Guide, GuideDetails, GuideDetailsDto, GuideProduct, GuideWithDetails,
+};
 
 #[async_trait]
 pub trait GuideRepositoryTrait: Send + Sync {
@@ -10,6 +14,12 @@ pub trait GuideRepositoryTrait: Send + Sync {
     async fn insert_guide_if_new(&self, number: &str, user_id: &str, business_id: i32) -> Result<Option<Guide>, String>;
     async fn get_guide_by_number(&self, number: &str) -> Result<Option<Guide>, String>;
     async fn get_guides(&self, user_phone: Option<&str>) -> Result<Vec<Guide>, String>;
+    /// Guarda los datos del pedido de una guía existente. Los campos en
+    /// None conservan su valor; si llegan productos, reemplazan a los
+    /// anteriores. Retorna false si la guía no existe.
+    async fn save_details(&self, number: &str, details: &GuideDetailsDto) -> Result<bool, String>;
+    /// Las guías existentes entre `numbers`, con sus datos de pedido.
+    async fn get_guides_with_details(&self, numbers: &[String]) -> Result<Vec<GuideWithDetails>, String>;
     /// Marca cuándo se notificó la guía por última vez.
     async fn mark_notified(&self, number: &str, timestamp: NaiveDateTime) -> Result<bool, String>;
     /// Notificaciones por día y tipo para el dashboard del business.
@@ -80,6 +90,121 @@ impl GuideRepositoryTrait for PostgresGuideRepository {
             .fetch_all(&self.db_pool)
             .await
             .map_err(|e| e.to_string())
+    }
+
+    async fn save_details(&self, number: &str, details: &GuideDetailsDto) -> Result<bool, String> {
+        let mut tx = self.db_pool.begin().await.map_err(|e| e.to_string())?;
+
+        let query = r#"
+            UPDATE guides SET
+                order_id = COALESCE($2, order_id),
+                customer_name = COALESCE($3, customer_name),
+                customer_document = COALESCE($4, customer_document),
+                delivery_address = COALESCE($5, delivery_address),
+                city = COALESCE($6, city),
+                shipping_company = COALESCE($7, shipping_company),
+                order_total = COALESCE($8::numeric, order_total),
+                currency = COALESCE($9, currency)
+            WHERE number = $1
+        "#;
+
+        let updated = sqlx::query(query)
+            .bind(number)
+            .bind(&details.order_id)
+            .bind(&details.customer_name)
+            .bind(&details.customer_document)
+            .bind(&details.delivery_address)
+            .bind(&details.city)
+            .bind(&details.shipping_company)
+            .bind(details.total)
+            .bind(&details.currency)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| e.to_string())?;
+
+        if updated.rows_affected() == 0 {
+            // La guía no existe: el drop de `tx` hace rollback.
+            return Ok(false);
+        }
+
+        if !details.products.is_empty() {
+            sqlx::query("DELETE FROM guide_products WHERE guide_number = $1")
+                .bind(number)
+                .execute(&mut *tx)
+                .await
+                .map_err(|e| e.to_string())?;
+
+            let insert = r#"
+                INSERT INTO guide_products (guide_number, product_id, product_name, quantity, unit_price, subtotal)
+                VALUES ($1, $2, $3, $4, $5::numeric, $6::numeric)
+            "#;
+
+            for product in &details.products {
+                sqlx::query(insert)
+                    .bind(number)
+                    .bind(product.product_id)
+                    .bind(&product.product_name)
+                    .bind(product.quantity)
+                    .bind(product.unit_price)
+                    .bind(product.subtotal)
+                    .execute(&mut *tx)
+                    .await
+                    .map_err(|e| e.to_string())?;
+            }
+        }
+
+        tx.commit().await.map_err(|e| e.to_string())?;
+        Ok(true)
+    }
+
+    async fn get_guides_with_details(&self, numbers: &[String]) -> Result<Vec<GuideWithDetails>, String> {
+        #[derive(sqlx::FromRow)]
+        struct GuideRow {
+            #[sqlx(flatten)]
+            guide: Guide,
+            #[sqlx(flatten)]
+            details: GuideDetails,
+        }
+
+        let guides_query = r#"
+            SELECT number, user_id, business_id, last_notification_timestamp, notification_count,
+                   order_id, customer_name, customer_document, delivery_address, city,
+                   shipping_company, order_total::float8 AS total, currency
+            FROM guides WHERE number = ANY($1)
+        "#;
+
+        let rows: Vec<GuideRow> = sqlx::query_as(guides_query)
+            .bind(numbers)
+            .fetch_all(&self.db_pool)
+            .await
+            .map_err(|e| e.to_string())?;
+
+        let products_query = r#"
+            SELECT guide_number, product_id, product_name, quantity,
+                   unit_price::float8 AS unit_price, subtotal::float8 AS subtotal
+            FROM guide_products WHERE guide_number = ANY($1)
+            ORDER BY guide_number, id
+        "#;
+
+        let products: Vec<GuideProduct> = sqlx::query_as(products_query)
+            .bind(numbers)
+            .fetch_all(&self.db_pool)
+            .await
+            .map_err(|e| e.to_string())?;
+
+        let mut products_by_guide: HashMap<String, Vec<GuideProduct>> = HashMap::new();
+        for product in products {
+            products_by_guide.entry(product.guide_number.clone()).or_default().push(product);
+        }
+
+        Ok(rows
+            .into_iter()
+            .map(|row| GuideWithDetails {
+                products: products_by_guide.remove(&row.guide.number).unwrap_or_default(),
+                guide: row.guide,
+                details: row.details,
+            })
+            .collect())
     }
 
     async fn mark_notified(&self, number: &str, timestamp: NaiveDateTime) -> Result<bool, String> {
