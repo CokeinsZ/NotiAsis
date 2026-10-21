@@ -181,3 +181,86 @@ export async function sendChatMessage(
 
   return data.data;
 }
+
+export type SendableMediaType = "image" | "video" | "audio" | "document";
+
+/**
+ * Envía un mensaje multimedia libre (imagen/video/audio/documento) dentro
+ * de la ventana de 24h. El archivo viaja como multipart/form-data al
+ * backend, que lo sube a Meta en memoria sin guardarlo en disco.
+ * `voice=true` solo para audios grabados: el backend los convierte a
+ * OGG/Opus mono con ffmpeg y los envía como nota de voz nativa.
+ */
+export async function sendChatMedia(
+  businessId: number,
+  userPhone: string,
+  file: Blob,
+  mediaType: SendableMediaType,
+  caption?: string,
+  filename?: string,
+  opts?: { voice?: boolean },
+): Promise<Message> {
+  const token = getToken();
+  const form = new FormData();
+  form.append("media_type", mediaType);
+  if (caption?.trim()) {
+    form.append("caption", caption.trim().slice(0, 1024));
+  }
+  if (opts?.voice && mediaType === "audio") {
+    form.append("voice", "true");
+  }
+  form.append("file", file, filename || defaultMediaFilename(mediaType, file.type));
+
+  const headers = new Headers();
+  if (token) {
+    headers.set("Authorization", `Bearer ${token}`);
+  }
+
+  const response = await fetch(
+    `${BASE}/chats/${businessId}/${encodeURIComponent(userPhone)}/messages/media`,
+    { method: "POST", headers, body: form },
+  );
+
+  if (response.status === 401) {
+    redirectToLogin();
+    throw new ApiError(401, "Sesión expirada");
+  }
+  if (!response.ok) {
+    const body = await response.json().catch(() => ({}));
+    throw new ApiError(response.status, body.message ?? `Error ${response.status}`);
+  }
+
+  const data = (await response.json()) as { data: Message; renewed_token: string | null };
+  if (data.renewed_token) {
+    setToken(data.renewed_token);
+  }
+  return data.data;
+}
+
+function defaultMediaFilename(mediaType: SendableMediaType, mime: string): string {
+  const ext =
+    mime === "image/png"
+      ? "png"
+      : mime === "image/webp"
+        ? "webp"
+        : mime === "video/mp4"
+          ? "mp4"
+          : mime === "audio/mpeg"
+            ? "mp3"
+            : mime === "audio/ogg" || mime === "application/ogg"
+              ? "ogg"
+              : mime === "audio/mp4"
+                ? "m4a"
+                : mime === "audio/webm" || mime === "video/webm"
+                  ? "webm"
+                  : mime === "application/pdf"
+                    ? "pdf"
+                    : mediaType === "image"
+                      ? "jpg"
+                      : mediaType === "video"
+                        ? "mp4"
+                        : mediaType === "audio"
+                          ? "ogg"
+                          : "pdf";
+  return `${mediaType}.${ext}`;
+}

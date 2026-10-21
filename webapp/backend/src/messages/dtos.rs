@@ -19,6 +19,7 @@ pub enum MediaType {
     Document,
     Audio,
     Image,
+    Video,
 }
 
 #[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]

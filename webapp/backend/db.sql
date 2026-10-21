@@ -13,7 +13,8 @@ DO $$ BEGIN
 		'text',
 		'document',
 		'audio',
-		'image'
+		'image',
+		'video'
 	);
 EXCEPTION WHEN duplicate_object THEN NULL;
 END $$;
@@ -154,7 +155,6 @@ CREATE TABLE IF NOT EXISTS guide_notifications (
 );
 
 CREATE INDEX IF NOT EXISTS idx_messages_chat_time ON messages (business_id, user_id, created_at DESC);
-CREATE INDEX IF NOT EXISTS idx_messages_meta_id ON messages (meta_message_id);
 CREATE INDEX IF NOT EXISTS idx_chats_business_activity ON chats (business_id, last_user_message_timestamp DESC);
 CREATE INDEX IF NOT EXISTS idx_guide_notifications_business_date ON guide_notifications (business_id, (created_at::date));
 CREATE INDEX IF NOT EXISTS idx_guide_notifications_guide ON guide_notifications (guide_number);

@@ -184,6 +184,20 @@ mod tests {
             Err("not implemented in fake".to_string())
         }
 
+        async fn send_free_media_message(
+            &self,
+            _: i32,
+            _: &str,
+            _: MediaType,
+            _: Option<String>,
+            _: String,
+            _: String,
+            _: Vec<u8>,
+            _: bool,
+        ) -> Result<Message, String> {
+            Err("not implemented in fake".to_string())
+        }
+
         async fn register_incoming(&self, dto: IncomingMessageDto) -> Result<Message, String> {
             Ok(Message {
                 id: 1,

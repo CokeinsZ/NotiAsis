@@ -5,7 +5,7 @@ from app.services.associate_directory import AssociateDirectory
 from app.services.shipping_notifier import ShippingNotificationService
 
 # Tipos de mensaje de Meta que el backend soporta en media_type_enum.
-SUPPORTED_MEDIA_TYPES = ("text", "document", "audio", "image")
+SUPPORTED_MEDIA_TYPES = ("text", "document", "audio", "image", "video")
 
 # Estados de mensajes salientes que Meta reporta en los webhooks.
 SUPPORTED_STATUSES = ("sent", "delivered", "read")

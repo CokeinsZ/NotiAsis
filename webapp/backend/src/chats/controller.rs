@@ -1,6 +1,6 @@
 use axum::{
     Json, Router,
-    extract::{Path, Query, State},
+    extract::{DefaultBodyLimit, Multipart, Path, Query, State},
     http::StatusCode,
     routing::get,
 };
@@ -10,7 +10,7 @@ use axum::routing::patch;
 
 use crate::auth::middleware::{AuthenticatedClaims, authorize_business};
 use crate::chats::dtos::{ChatFilters, SetImportanceDto};
-use crate::messages::dtos::SendMessageDto;
+use crate::messages::dtos::{MediaType, SendMessageDto};
 use crate::state::ChatState;
 use crate::tools::responses::{build_validation_response, json_response};
 
@@ -110,6 +110,174 @@ async fn send_chat_message(
     }
 }
 
+/// Envío de mensaje multimedia libre dentro de la ventana de 24h.
+/// Recibe multipart/form-data con `file`, `media_type`
+/// (image|video|audio|document), `caption` opcional y `voice` opcional
+/// ("true" para notas de voz grabadas: se convierten a OGG/Opus y se
+/// envían con voice:true). Sube el archivo a Meta en memoria (sin tocar
+/// disco salvo temporales de transcodificación) y envía el mensaje.
+/// También renueva el token como el envío de texto.
+async fn send_chat_media_message(
+    claims: AuthenticatedClaims,
+    State(state): State<ChatState>,
+    Path((business_id, user_phone)): Path<(i32, String)>,
+    mut multipart: Multipart,
+) -> (StatusCode, Json<serde_json::Value>) {
+    if let Err(response) = authorize_business(&claims.0, business_id) {
+        return response;
+    }
+
+    let mut media_type_raw: Option<String> = None;
+    let mut caption_raw: Option<String> = None;
+    let mut voice_raw: Option<String> = None;
+    let mut file_bytes: Option<Vec<u8>> = None;
+    let mut file_name: Option<String> = None;
+    let mut file_mime: Option<String> = None;
+
+    while let Ok(Some(field)) = multipart.next_field().await {
+        let name = field.name().unwrap_or_default().to_string();
+        match name.as_str() {
+            "media_type" => {
+                if let Ok(text) = field.text().await {
+                    media_type_raw = Some(text);
+                }
+            }
+            "caption" => {
+                if let Ok(text) = field.text().await {
+                    caption_raw = Some(text);
+                }
+            }
+            "voice" => {
+                if let Ok(text) = field.text().await {
+                    voice_raw = Some(text);
+                }
+            }
+            "file" => {
+                file_name = field.file_name().map(|s| s.to_string());
+                file_mime = field.content_type().map(|s| s.to_string());
+                match field.bytes().await {
+                    Ok(bytes) => file_bytes = Some(bytes.to_vec()),
+                    Err(e) => {
+                        return json_response(
+                            StatusCode::BAD_REQUEST,
+                            serde_json::json!({ "message": format!("Error reading file: {e}") }),
+                        );
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    let media_type: MediaType = match media_type_raw.as_deref().map(str::trim) {
+        Some("image") => MediaType::Image,
+        Some("video") => MediaType::Video,
+        Some("audio") => MediaType::Audio,
+        Some("document") => MediaType::Document,
+        _ => {
+            return json_response(
+                StatusCode::BAD_REQUEST,
+                serde_json::json!({ "message": "media_type debe ser image, video, audio o document" }),
+            );
+        }
+    };
+
+    let is_voice = matches!(voice_raw.as_deref().map(str::trim).map(str::to_lowercase).as_deref(), Some("true") | Some("1") | Some("yes"));
+    if is_voice && media_type != MediaType::Audio {
+        return json_response(
+            StatusCode::BAD_REQUEST,
+            serde_json::json!({ "message": "Voice messages must be audio" }),
+        );
+    }
+
+    let bytes = match file_bytes {
+        Some(b) if !b.is_empty() => b,
+        _ => {
+            return json_response(
+                StatusCode::BAD_REQUEST,
+                serde_json::json!({ "message": "El archivo es requerido y no puede estar vacío" }),
+            );
+        }
+    };
+
+    // Límite duro en memoria (el mayor permitido + margen multipart).
+    const HARD_LIMIT: usize = 26 * 1024 * 1024;
+    if bytes.len() > HARD_LIMIT {
+        return json_response(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            serde_json::json!({ "message": "El archivo supera los 25MB permitidos." }),
+        );
+    }
+
+    let mime = file_mime.unwrap_or_else(|| "application/octet-stream".to_string());
+    let filename = file_name
+        .filter(|n| !n.trim().is_empty())
+        .unwrap_or_else(|| default_filename(media_type, &mime));
+
+    let caption = caption_raw.filter(|c| !c.trim().is_empty());
+
+    match state
+        .message_service
+        .send_free_media_message(business_id, &user_phone, media_type, caption, filename, mime, bytes, is_voice)
+        .await
+    {
+        Ok(message) => {
+            let renewed_token = state.auth_service
+                .renew_token(&claims.0)
+                .map(|t| t.token)
+                .ok();
+
+            json_response(
+                StatusCode::CREATED,
+                serde_json::json!({
+                    "message": "Media message sent",
+                    "data": message,
+                    "renewed_token": renewed_token
+                }),
+            )
+        }
+        Err(e) => {
+            let status = match e.as_str() {
+                "Chat not found" => StatusCode::NOT_FOUND,
+                e if e.contains("window is closed") => StatusCode::UNPROCESSABLE_ENTITY,
+                e if e.contains("ffmpeg") || e.contains("procesar el audio") || e.contains("conversión") || e.contains("Meta") => StatusCode::BAD_GATEWAY,
+                e if e.contains("supera los") || e.contains("no soportado") || e.contains("vacío") || e.contains("1024") => StatusCode::BAD_REQUEST,
+                _ => StatusCode::BAD_REQUEST,
+            };
+            json_response(status, serde_json::json!({ "message": e }))
+        }
+    }
+}
+
+fn default_filename(media_type: MediaType, mime: &str) -> String {
+    let ext = match mime {
+        "image/jpeg" => "jpg",
+        "image/png" => "png",
+        "image/webp" => "webp",
+        "video/mp4" => "mp4",
+        "video/3gpp" => "3gp",
+        "audio/mpeg" => "mp3",
+        "audio/ogg" | "application/ogg" => "ogg",
+        "audio/mp4" => "m4a",
+        "audio/webm" | "video/webm" => "webm",
+        "application/pdf" => "pdf",
+        _ => match media_type {
+            MediaType::Image => "jpg",
+            MediaType::Video => "mp4",
+            MediaType::Audio => "ogg",
+            MediaType::Document => "pdf",
+            MediaType::Text => "txt",
+        },
+    };
+    match media_type {
+        MediaType::Image => format!("imagen.{ext}"),
+        MediaType::Video => format!("video.{ext}"),
+        MediaType::Audio => format!("audio.{ext}"),
+        MediaType::Document => format!("documento.{ext}"),
+        MediaType::Text => format!("archivo.{ext}"),
+    }
+}
+
 /// Marca o desmarca un chat como importante.
 async fn set_importance(
     claims: AuthenticatedClaims,
@@ -143,6 +311,12 @@ pub fn chat_routes(state: ChatState) -> Router {
     Router::new()
         .route("/", get(get_chats))
         .route("/{business_id}/{user_phone}/messages", get(get_chat_messages).post(send_chat_message))
+        // Multipart en memoria hasta 26MB (el resto sigue con el límite
+        // por defecto de 2MB de axum).
+        .route(
+            "/{business_id}/{user_phone}/messages/media",
+            axum::routing::post(send_chat_media_message).layer(DefaultBodyLimit::disable()),
+        )
         .route("/{business_id}/{user_phone}/importance", patch(set_importance))
         .with_state(state)
 }
@@ -206,6 +380,37 @@ mod tests {
                 media_id: None,
                 media_type: crate::messages::dtos::MediaType::Text,
                 message: Some("hola".into()),
+                status: Some(MessageStatus::Sent),
+                from_user: false,
+                created_at: chrono::Utc::now().naive_utc(),
+            })
+        }
+
+        async fn send_free_media_message(
+            &self,
+            business_id: i32,
+            user_phone: &str,
+            media_type: crate::messages::dtos::MediaType,
+            caption: Option<String>,
+            _filename: String,
+            _mime: String,
+            bytes: Vec<u8>,
+            is_voice: bool,
+        ) -> Result<Message, String> {
+            if bytes.is_empty() {
+                return Err("El archivo está vacío.".to_string());
+            }
+            if is_voice && media_type != crate::messages::dtos::MediaType::Audio {
+                return Err("Voice messages must be audio".to_string());
+            }
+            Ok(Message {
+                id: 2,
+                meta_message_id: "wamid.fake-media".into(),
+                business_id,
+                user_id: user_phone.to_string(),
+                media_id: Some("mid.fake".into()),
+                media_type,
+                message: caption,
                 status: Some(MessageStatus::Sent),
                 from_user: false,
                 created_at: chrono::Utc::now().naive_utc(),
@@ -373,5 +578,203 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+
+    fn multipart_body(boundary: &str, parts: Vec<(&str, Option<(&str, &str, Vec<u8>)>, Option<String>)>) -> (String, Vec<u8>) {
+        // parts: (field_name, Some((filename, mime, bytes)) | None, text_value)
+        let mut body = Vec::new();
+        for (name, file, text) in parts {
+            body.extend_from_slice(format!("--{boundary}\r\n").as_bytes());
+            if let Some((filename, mime, bytes)) = file {
+                body.extend_from_slice(
+                    format!("Content-Disposition: form-data; name=\"{name}\"; filename=\"{filename}\"\r\nContent-Type: {mime}\r\n\r\n").as_bytes(),
+                );
+                body.extend_from_slice(&bytes);
+                body.extend_from_slice(b"\r\n");
+            } else if let Some(value) = text {
+                body.extend_from_slice(
+                    format!("Content-Disposition: form-data; name=\"{name}\"\r\n\r\n{value}\r\n").as_bytes(),
+                );
+            }
+        }
+        body.extend_from_slice(format!("--{boundary}--\r\n").as_bytes());
+        (format!("multipart/form-data; boundary={boundary}"), body)
+    }
+
+    #[tokio::test]
+    async fn send_media_message_returns_201_and_renews_token() {
+        let boundary = "testboundary123";
+        let (content_type, body) = multipart_body(
+            boundary,
+            vec![
+                ("media_type", None, Some("image".to_string())),
+                ("caption", None, Some("mira esto".to_string())),
+                ("file", Some(("foto.jpg", "image/jpeg", b"fake-image-bytes".to_vec())), None),
+            ],
+        );
+
+        let response = create_routes()
+            .oneshot(
+                Request::builder()
+                    .uri("/7/573003579384/messages/media")
+                    .method("POST")
+                    .header("Authorization", "Bearer valido")
+                    .header("Content-Type", content_type)
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::CREATED);
+        let body_bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let body_json: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
+        assert_eq!(body_json["data"]["media_type"], "image");
+        assert_eq!(body_json["renewed_token"], "stiven-renovado");
+    }
+
+    #[tokio::test]
+    async fn send_media_without_file_returns_400() {
+        let boundary = "testboundary456";
+        let (content_type, body) = multipart_body(
+            boundary,
+            vec![("media_type", None, Some("image".to_string()))],
+        );
+
+        let response = create_routes()
+            .oneshot(
+                Request::builder()
+                    .uri("/7/573003579384/messages/media")
+                    .method("POST")
+                    .header("Authorization", "Bearer valido")
+                    .header("Content-Type", content_type)
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn send_media_with_invalid_type_returns_400() {
+        let boundary = "testboundary789";
+        let (content_type, body) = multipart_body(
+            boundary,
+            vec![
+                ("media_type", None, Some("sticker".to_string())),
+                ("file", Some(("foto.jpg", "image/jpeg", b"bytes".to_vec())), None),
+            ],
+        );
+
+        let response = create_routes()
+            .oneshot(
+                Request::builder()
+                    .uri("/7/573003579384/messages/media")
+                    .method("POST")
+                    .header("Authorization", "Bearer valido")
+                    .header("Content-Type", content_type)
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn send_media_to_another_business_returns_403() {
+        let boundary = "testboundary000";
+        let (content_type, body) = multipart_body(
+            boundary,
+            vec![
+                ("media_type", None, Some("image".to_string())),
+                ("file", Some(("foto.jpg", "image/jpeg", b"bytes".to_vec())), None),
+            ],
+        );
+
+        let response = create_routes()
+            .oneshot(
+                Request::builder()
+                    .uri("/9/573003579384/messages/media")
+                    .method("POST")
+                    .header("Authorization", "Bearer valido")
+                    .header("Content-Type", content_type)
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[test]
+    fn default_filename_uses_extension() {
+        assert_eq!(default_filename(MediaType::Image, "image/png"), "imagen.png");
+        assert_eq!(default_filename(MediaType::Video, "video/mp4"), "video.mp4");
+        assert_eq!(default_filename(MediaType::Audio, "audio/ogg"), "audio.ogg");
+        assert_eq!(default_filename(MediaType::Document, "application/pdf"), "documento.pdf");
+    }
+
+    #[tokio::test]
+    async fn send_voice_note_returns_201() {
+        let boundary = "voiceboundary123";
+        let (content_type, body) = multipart_body(
+            boundary,
+            vec![
+                ("media_type", None, Some("audio".to_string())),
+                ("voice", None, Some("true".to_string())),
+                ("file", Some(("audio.webm", "audio/webm", b"fake-webm-bytes".to_vec())), None),
+            ],
+        );
+
+        let response = create_routes()
+            .oneshot(
+                Request::builder()
+                    .uri("/7/573003579384/messages/media")
+                    .method("POST")
+                    .header("Authorization", "Bearer valido")
+                    .header("Content-Type", content_type)
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::CREATED);
+        let body_bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let body_json: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
+        assert_eq!(body_json["data"]["media_type"], "audio");
+    }
+
+    #[tokio::test]
+    async fn send_voice_flag_with_non_audio_returns_400() {
+        let boundary = "voiceboundary456";
+        let (content_type, body) = multipart_body(
+            boundary,
+            vec![
+                ("media_type", None, Some("image".to_string())),
+                ("voice", None, Some("true".to_string())),
+                ("file", Some(("foto.jpg", "image/jpeg", b"bytes".to_vec())), None),
+            ],
+        );
+
+        let response = create_routes()
+            .oneshot(
+                Request::builder()
+                    .uri("/7/573003579384/messages/media")
+                    .method("POST")
+                    .header("Authorization", "Bearer valido")
+                    .header("Content-Type", content_type)
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     }
 }
