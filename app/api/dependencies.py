@@ -7,8 +7,6 @@ servicios que dependen de abstracciones.
 
 from functools import lru_cache
 
-from fastapi import HTTPException
-
 from app.config import Settings
 from app.services.associate_directory import AssociateDirectory
 from app.services.backend_client import RustBackendClient
@@ -67,10 +65,6 @@ def get_sheet_notifier() -> SheetNotificationService:
 @lru_cache
 def get_dropi_notifier() -> DropiNotificationService:
     settings = get_settings()
-    if settings.dropi_business_id is None:
-        # Sin business no hay a qué chats asociar los mensajes.
-        raise HTTPException(status_code=503, detail="DROPI_BUSINESS_ID no está configurado")
-
     return DropiNotificationService(
         order_source=N8nDropiClient(base_url=settings.dropi_n8n_url),
         backend=get_backend_client(),
@@ -78,7 +72,6 @@ def get_dropi_notifier() -> DropiNotificationService:
             access_token=settings.whatsapp_token,
             phone_number_id=settings.whatsapp_phone_id,
         ),
-        business_id=settings.dropi_business_id,
         debug_notification_number=settings.debug_notification_number,
         notification_override_number=settings.notification_override_number,
     )

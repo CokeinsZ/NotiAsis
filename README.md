@@ -132,8 +132,9 @@ el backend (`GET /businesses/{id}/sheet` → `business_users_sheet`):
 
 ### Notificación de pedidos de Dropi (MCP vía N8N)
 
-`POST /notify-dropi-mcp` (responde 202 y procesa en segundo plano). El
-body es opcional:
+`POST /notify-dropi-mcp?business_id=N` (responde 202 y procesa en
+segundo plano). `business_id` es obligatorio: es el business dueño de los
+chats e historial de la corrida (404 si no existe). El body es opcional:
 
 | Campo | Por defecto |
 |---|---|
@@ -142,9 +143,17 @@ body es opcional:
 | `result_number` | 100 |
 | `start` | 0 |
 
-Requiere `DROPI_BUSINESS_ID` (el business dueño de los chats; sin él
-responde 503). `DROPI_N8N_URL` apunta a los webhooks de N8N
-(por defecto `https://n8n.notiasis.com/webhook/dropi`).
+```bash
+curl -X POST "localhost:8000/notify-dropi-mcp?business_id=1" \
+  -H "Content-Type: application/json" \
+  -d '{"from": "2026-10-18", "until": "2026-10-20"}'
+```
+
+`DROPI_N8N_URL` apunta a los webhooks de N8N (por defecto
+`https://n8n.notiasis.com/webhook/dropi`). Las guías que ya pertenecen a
+otro business se omiten. El reporte de la corrida (nuevas, recordatorios,
+omitidas, errores, consultas a `/orden`) se imprime en los logs del bot
+al terminar.
 
 1. Pagina `GET {DROPI_N8N_URL}/oficina` (body JSON con los filtros):
    mientras `count == result_number` pide la siguiente página con
@@ -166,12 +175,14 @@ El MCP de Dropi tiene rate limit, así que el detalle del pedido
 datos: la primera notificación de cada guía (o un `recordatorio_final`
 de una guía vieja registrada sin productos). Esos datos (cliente y
 productos) se guardan con la guía (`POST /guides` con `details`) y los
-recordatorios los leen del backend. Ante 429/5xx el cliente reintenta
-con espera exponencial.
+recordatorios los leen del backend; de los productos se guardan id,
+nombre y cantidad (los precios que envía N8N se descartan). Ante
+429/5xx el cliente reintenta con espera exponencial.
 
 Migración: volver a correr `webapp/backend/db.sql` sobre la base
 existente (es idempotente) agrega las columnas de pedido a `guides` y la
-tabla `guide_products`.
+tabla `guide_products` (y le quita `unit_price` y `subtotal` si se
+habían creado).
 
 ## Agregar una nueva plantilla de WhatsApp
 

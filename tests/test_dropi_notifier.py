@@ -6,12 +6,16 @@ Todo con dobles de prueba: sin N8N, sin Meta, sin backend real.
 from datetime import date, datetime, timedelta
 
 import pytest
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
 from pydantic import ValidationError
 
-from app.api.notify_dropi import NotifyDropiRequest
+from app.api.dependencies import get_backend_client, get_dropi_notifier
+from app.api.notify_dropi import NotifyDropiRequest, router as notify_dropi_router
 from app.services.dropi_client import N8nDropiClient
 from app.services.dropi_notifier import DropiNotificationService
 
+BUSINESS_ID = 1
 FROM = date(2026, 10, 6)
 UNTIL = date(2026, 10, 21)
 YESTERDAY = (datetime.now() - timedelta(days=1)).isoformat(timespec="seconds")
@@ -66,7 +70,7 @@ class FakeBackend:
                                 "business_id": business_id, "details": details})
         if number in self.guides:
             return False
-        self.guides[number] = guide(number, user_phone, count=0)
+        self.guides[number] = guide(number, user_phone, count=0, business_id=business_id)
         return True
 
     def mark_guide_notified(self, number):
@@ -119,11 +123,12 @@ def order_detail(order_id, tracking, product="Collar Girasol GIRATORIO + Caja Cu
     }
 
 
-def guide(number, user_id="573105409038", count=1, last=YESTERDAY, products=None, details=None):
+def guide(number, user_id="573105409038", count=1, last=YESTERDAY, products=None, details=None,
+          business_id=BUSINESS_ID):
     return {
         "number": number,
         "user_id": user_id,
-        "business_id": 1,
+        "business_id": business_id,
         "notification_count": count,
         "last_notification_timestamp": last,
         "details": details or {},
@@ -146,7 +151,6 @@ def build_service(source, backend=None, sender=None, override=None, debug=None):
         order_source=source,
         backend=backend,
         message_sender=sender,
-        business_id=1,
         debug_notification_number=debug,
         notification_override_number=override,
     )
@@ -161,7 +165,7 @@ def test_paginates_while_pages_come_full():
     source = FakeDropiSource(orders, details={str(i): order_detail(str(i), f"G{i}") for i in range(5)})
     service, backend, _ = build_service(source)
 
-    report = service.notify_office_orders(FROM, UNTIL, result_number=2, start=0)
+    report = service.notify_office_orders(BUSINESS_ID, FROM, UNTIL, result_number=2, start=0)
 
     # count 2 == result_number -> siguiente página con start += count
     assert [call[3] for call in source.office_calls] == [0, 2, 4]
@@ -175,7 +179,7 @@ def test_last_page_exactly_full_requests_one_more_empty_page():
     source = FakeDropiSource(orders, details={str(i): order_detail(str(i), f"G{i}") for i in range(4)})
     service, _, _ = build_service(source)
 
-    service.notify_office_orders(FROM, UNTIL, result_number=2, start=0)
+    service.notify_office_orders(BUSINESS_ID, FROM, UNTIL, result_number=2, start=0)
 
     assert [call[3] for call in source.office_calls] == [0, 2, 4]
 
@@ -185,7 +189,7 @@ def test_pagination_starts_from_requested_start():
     source = FakeDropiSource(orders, details={})
     service, _, _ = build_service(source)
 
-    service.notify_office_orders(FROM, UNTIL, result_number=3, start=10)
+    service.notify_office_orders(BUSINESS_ID, FROM, UNTIL, result_number=3, start=10)
 
     assert [call[3] for call in source.office_calls] == [10, 13]
     assert source.office_calls[0][:3] == (FROM, UNTIL, 3)
@@ -198,7 +202,7 @@ def test_repeated_pages_stop_pagination():
                              ignore_start=True)
     service, _, sender = build_service(source)
 
-    report = service.notify_office_orders(FROM, UNTIL, result_number=2)
+    report = service.notify_office_orders(BUSINESS_ID, FROM, UNTIL, result_number=2)
 
     assert len(source.office_calls) == 2
     assert report.total_orders == 2
@@ -212,7 +216,7 @@ def test_office_page_failure_processes_orders_already_fetched():
                              fail_on_start=2)
     service, _, sender = build_service(source)
 
-    report = service.notify_office_orders(FROM, UNTIL, result_number=2)
+    report = service.notify_office_orders(BUSINESS_ID, FROM, UNTIL, result_number=2)
 
     assert report.total_orders == 2
     assert len(sender.sent) == 2
@@ -227,7 +231,7 @@ def test_new_guide_sends_only_mensaje_guia_and_stores_order():
                              details={"93632719": order_detail("93632719", "240063856178")})
     service, backend, sender = build_service(source)
 
-    report = service.notify_office_orders(FROM, UNTIL)
+    report = service.notify_office_orders(BUSINESS_ID, FROM, UNTIL)
 
     assert report.new_notifications == 1
     assert source.order_calls == ["93632719"]  # única consulta al MCP
@@ -244,7 +248,7 @@ def test_new_guide_sends_only_mensaje_guia_and_stores_order():
     assert details["order_id"] == "93632719"
     assert details["shipping_company"] == "INTERRAPIDISIMO"
     assert details["products"] == [{"product_id": 2298431, "product_name": "Collar Girasol GIRATORIO + Caja Cuerina",
-                                    "quantity": 1, "unit_price": 24900.0, "subtotal": 84900.0}]
+                                    "quantity": 1}]  # los precios de N8N no se guardan
 
     assert backend.outgoing[0]["media_type"] == "text"
     assert backend.outgoing[0]["media_id"] is None
@@ -256,7 +260,7 @@ def test_guide_notified_once_gets_reminder_without_calling_dropi():
     backend = FakeBackend({"G1": guide("G1", count=1)})
     service, backend, sender = build_service(source, backend)
 
-    report = service.notify_office_orders(FROM, UNTIL)
+    report = service.notify_office_orders(BUSINESS_ID, FROM, UNTIL)
 
     assert report.reminders == 1
     assert source.order_calls == []
@@ -270,7 +274,7 @@ def test_guide_notified_twice_gets_final_reminder_with_stored_product():
     backend = FakeBackend({"G1": guide("G1", count=2, details=stored_details(), products=stored_products())})
     service, backend, sender = build_service(source, backend)
 
-    report = service.notify_office_orders(FROM, UNTIL)
+    report = service.notify_office_orders(BUSINESS_ID, FROM, UNTIL)
 
     assert report.final_reminders == 1
     assert source.order_calls == []
@@ -284,7 +288,7 @@ def test_legacy_guide_without_products_fetches_order_once_for_final_reminder():
     backend = FakeBackend({"G1": guide("G1", count=2)})
     service, backend, sender = build_service(source, backend)
 
-    report = service.notify_office_orders(FROM, UNTIL)
+    report = service.notify_office_orders(BUSINESS_ID, FROM, UNTIL)
 
     assert report.final_reminders == 1
     assert source.order_calls == ["1"]
@@ -298,7 +302,7 @@ def test_max_notifications_or_notified_today_sends_nothing(count, last):
     backend = FakeBackend({"G1": guide("G1", count=count, last=last)})
     service, backend, sender = build_service(source, backend)
 
-    report = service.notify_office_orders(FROM, UNTIL)
+    report = service.notify_office_orders(BUSINESS_ID, FROM, UNTIL)
 
     assert sender.sent == []
     assert report.skipped == ["G1"]
@@ -312,7 +316,7 @@ def test_registered_guide_never_notified_is_retried_without_dropi_or_reregisteri
                                        products=stored_products())})
     service, backend, sender = build_service(source, backend)
 
-    report = service.notify_office_orders(FROM, UNTIL)
+    report = service.notify_office_orders(BUSINESS_ID, FROM, UNTIL)
 
     assert report.new_notifications == 1
     assert source.order_calls == []
@@ -326,13 +330,38 @@ def test_registered_guide_without_details_is_completed_and_notified():
     backend = FakeBackend({"G1": guide("G1", count=0, last=None)})
     service, backend, sender = build_service(source, backend)
 
-    report = service.notify_office_orders(FROM, UNTIL)
+    report = service.notify_office_orders(BUSINESS_ID, FROM, UNTIL)
 
     # register_guide responde False (ya existía) pero no es una carrera:
     # solo se usó para guardar los datos del pedido.
     assert report.new_notifications == 1
     assert backend.registered[0]["details"]["order_id"] == "1"
     assert backend.notified == ["G1"]
+
+
+# ------------------------------ Business ------------------------------
+
+
+def test_run_uses_requested_business_for_guides_and_history():
+    source = FakeDropiSource([office_order("1", "G1")], details={"1": order_detail("1", "G1")})
+    service, backend, _ = build_service(source)
+
+    service.notify_office_orders(7, FROM, UNTIL)
+
+    assert backend.registered[0]["business_id"] == 7
+    assert backend.outgoing[0]["business_id"] == 7
+
+
+def test_guide_of_another_business_is_skipped():
+    source = FakeDropiSource([office_order("1", "G1")])
+    backend = FakeBackend({"G1": guide("G1", count=1, business_id=2)})
+    service, backend, sender = build_service(source, backend)
+
+    report = service.notify_office_orders(BUSINESS_ID, FROM, UNTIL)
+
+    assert sender.sent == []
+    assert report.skipped == ["G1"]
+    assert backend.notified == []
 
 
 # ------------------------------ Casos borde ------------------------------
@@ -342,7 +371,7 @@ def test_duplicate_tracking_codes_are_notified_once():
     source = FakeDropiSource([office_order("1", "G1"), office_order("2", "G1")], details={"1": order_detail("1", "G1")})
     service, _, sender = build_service(source)
 
-    report = service.notify_office_orders(FROM, UNTIL)
+    report = service.notify_office_orders(BUSINESS_ID, FROM, UNTIL)
 
     assert report.total_orders == 1
     assert len(sender.sent) == 1
@@ -352,7 +381,7 @@ def test_orders_without_tracking_code_are_skipped():
     source = FakeDropiSource([office_order("1", ""), office_order("2", "G2")], details={"2": order_detail("2", "G2")})
     service, backend, sender = build_service(source)
 
-    report = service.notify_office_orders(FROM, UNTIL)
+    report = service.notify_office_orders(BUSINESS_ID, FROM, UNTIL)
 
     assert backend.lookups == [["G2"]]
     assert len(sender.sent) == 1
@@ -363,7 +392,7 @@ def test_backend_lookup_failure_sends_nothing():
     source = FakeDropiSource([office_order("1", "G1")], details={"1": order_detail("1", "G1")})
     service, _, sender = build_service(source, FakeBackend(lookup_fails=True))
 
-    report = service.notify_office_orders(FROM, UNTIL)
+    report = service.notify_office_orders(BUSINESS_ID, FROM, UNTIL)
 
     assert sender.sent == []
     assert source.order_calls == []
@@ -374,7 +403,7 @@ def test_order_detail_failure_is_an_error():
     source = FakeDropiSource([office_order("1", "G1")], details={})
     service, backend, sender = build_service(source)
 
-    report = service.notify_office_orders(FROM, UNTIL)
+    report = service.notify_office_orders(BUSINESS_ID, FROM, UNTIL)
 
     assert report.errors == ["G1"]
     assert sender.sent == []
@@ -385,7 +414,7 @@ def test_failed_send_does_not_mark_guide_as_notified():
     source = FakeDropiSource([office_order("1", "G1")], details={"1": order_detail("1", "G1")})
     service, backend, _ = build_service(source, sender=FakeSender(fail=True))
 
-    report = service.notify_office_orders(FROM, UNTIL)
+    report = service.notify_office_orders(BUSINESS_ID, FROM, UNTIL)
 
     assert report.errors == ["G1"]
     assert backend.registered  # queda registrada con count 0: se reintenta en la próxima corrida
@@ -397,7 +426,7 @@ def test_override_redirects_sending_but_registers_real_recipient():
     source = FakeDropiSource([office_order("1", "G1")], details={"1": order_detail("1", "G1")})
     service, backend, sender = build_service(source, override="573009999999", debug="573008888888")
 
-    service.notify_office_orders(FROM, UNTIL)
+    service.notify_office_orders(BUSINESS_ID, FROM, UNTIL)
 
     assert [s[0] for s in sender.sent] == ["573009999999", "573008888888"]
     assert backend.outgoing[0]["user_phone"] == "573105409038"
@@ -408,7 +437,7 @@ def test_product_names_are_single_line_for_meta():
     source = FakeDropiSource([office_order("1", "G1")], details={"1": detail})
     service, backend, sender = build_service(source)
 
-    service.notify_office_orders(FROM, UNTIL)
+    service.notify_office_orders(BUSINESS_ID, FROM, UNTIL)
 
     assert backend.registered[0]["details"]["products"][0]["product_name"] == "Collar Girasol + Caja"
 
@@ -441,6 +470,57 @@ def test_request_accepts_from_alias():
 def test_request_rejects_invalid_filters(payload):
     with pytest.raises(ValidationError):
         NotifyDropiRequest.model_validate(payload)
+
+
+class FakeNotifier:
+    def __init__(self):
+        self.runs = []
+
+    def notify_office_orders(self, *args):
+        self.runs.append(args)
+
+
+class FakeBusinessBackend:
+    def __init__(self, exists):
+        self.exists = exists
+
+    def business_exists(self, business_id):
+        return self.exists
+
+
+def endpoint_client(exists=True):
+    app = FastAPI()
+    app.include_router(notify_dropi_router)
+    notifier = FakeNotifier()
+    app.dependency_overrides[get_dropi_notifier] = lambda: notifier
+    app.dependency_overrides[get_backend_client] = lambda: FakeBusinessBackend(exists)
+    return TestClient(app), notifier
+
+
+def test_endpoint_runs_for_business_in_query():
+    client, notifier = endpoint_client()
+
+    response = client.post("/notify-dropi-mcp?business_id=3", json={"from": "2026-10-18", "until": "2026-10-20"})
+
+    assert response.status_code == 202
+    assert response.json()["business_id"] == 3
+    assert notifier.runs == [(3, date(2026, 10, 18), date(2026, 10, 20), 100, 0)]
+
+
+@pytest.mark.parametrize("query", ["", "?business_id=0", "?business_id=abc"])
+def test_endpoint_requires_valid_business_id(query):
+    client, notifier = endpoint_client()
+
+    assert client.post(f"/notify-dropi-mcp{query}").status_code == 422
+    assert notifier.runs == []
+
+
+@pytest.mark.parametrize("exists,status", [(False, 404), (None, 503)])
+def test_endpoint_rejects_unknown_business_or_unreachable_backend(exists, status):
+    client, notifier = endpoint_client(exists=exists)
+
+    assert client.post("/notify-dropi-mcp?business_id=99").status_code == status
+    assert notifier.runs == []
 
 
 # ------------------------------ Cliente N8N ------------------------------

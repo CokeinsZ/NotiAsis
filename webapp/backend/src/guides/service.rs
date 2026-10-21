@@ -313,8 +313,6 @@ mod tests {
                 product_id: Some(2298431),
                 product_name: "Collar Girasol".into(),
                 quantity: 1,
-                unit_price: Some(24900.0),
-                subtotal: Some(84900.0),
             }],
             ..Default::default()
         }

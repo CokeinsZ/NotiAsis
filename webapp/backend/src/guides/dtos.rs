@@ -87,9 +87,6 @@ pub struct GuideProductDto {
     #[serde(default = "default_quantity")]
     #[validate(range(min = 1, message = "La cantidad debe ser positiva"))]
     pub quantity: i32,
-
-    pub unit_price: Option<f64>,
-    pub subtotal: Option<f64>,
 }
 
 fn default_quantity() -> i32 {
@@ -128,8 +125,6 @@ pub struct GuideProduct {
     pub product_id: Option<i64>,
     pub product_name: String,
     pub quantity: i32,
-    pub unit_price: Option<f64>,
-    pub subtotal: Option<f64>,
 }
 
 /// Guía con sus datos de pedido: con esto el bot decide el paso de
@@ -203,6 +198,7 @@ mod tests {
 
     #[test]
     fn register_guide_with_dropi_details() {
+        // unit_price ya no se guarda: un bot viejo que lo envíe no falla.
         let dto: RegisterGuideDto = serde_json::from_str(r#"{
             "number": "240063856178",
             "user_phone": "573105409038",
@@ -230,8 +226,6 @@ mod tests {
             product_id: None,
             product_name: name.into(),
             quantity,
-            unit_price: None,
-            subtotal: None,
         };
         let with_products = |products| RegisterGuideDto {
             number: "G1".into(),

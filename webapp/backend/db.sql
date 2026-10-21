@@ -136,13 +136,15 @@ CREATE TABLE IF NOT EXISTS guide_products (
 	product_id BIGINT,
 	product_name VARCHAR(512) NOT NULL,
 	quantity INT NOT NULL DEFAULT 1,
-	unit_price NUMERIC(14, 2),
-	subtotal NUMERIC(14, 2),
 
 	FOREIGN KEY (guide_number) REFERENCES guides(number)
 		ON DELETE CASCADE
 		ON UPDATE CASCADE
 );
+
+-- Precios de producto: N8N los envía pero no se guardan.
+ALTER TABLE guide_products DROP COLUMN IF EXISTS unit_price;
+ALTER TABLE guide_products DROP COLUMN IF EXISTS subtotal;
 
 CREATE TABLE IF NOT EXISTS invoices (
 	id SERIAL PRIMARY KEY,

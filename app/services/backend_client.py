@@ -130,6 +130,17 @@ class RustBackendClient(NotificationBackend):
             print(f"Error looking up {len(numbers)} guide(s) in backend: {e}")
             return None
 
+    def business_exists(self, business_id: int) -> bool | None:
+        try:
+            response = self._request("GET", f"/businesses/{business_id}")
+            if response.status_code == 404:
+                return False
+            response.raise_for_status()
+            return True
+        except Exception as e:
+            print(f"Error fetching business {business_id} from backend: {e}")
+            return None
+
     def get_business_sheet(self, business_id: int) -> dict | None:
         try:
             response = self._request("GET", f"/businesses/{business_id}/sheet")

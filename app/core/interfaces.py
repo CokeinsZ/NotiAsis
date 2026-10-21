@@ -103,7 +103,8 @@ class NotificationBackend(ABC):
     Todas las operaciones son tolerantes a fallos: si el backend no
     responde, se registra el error y el flujo del bot continúa (fail-open),
     salvo `register_guide`, cuya respuesta determina si se notifica o no,
-    y `lookup_guides`, que retorna None para que la corrida se detenga.
+    y `lookup_guides` y `business_exists`, que retornan None para que el
+    llamador se detenga.
     """
 
     @abstractmethod
@@ -138,6 +139,10 @@ class NotificationBackend(ABC):
         """Guías existentes entre `numbers`, con sus datos de pedido
         ({número: guía}). None si el backend falla: sin saber cuántas
         veces se notificó cada guía no se puede decidir qué enviar."""
+
+    @abstractmethod
+    def business_exists(self, business_id: int) -> bool | None:
+        """True/False según exista el business. None si el backend falla."""
 
     @abstractmethod
     def get_business_sheet(self, business_id: int) -> dict | None:

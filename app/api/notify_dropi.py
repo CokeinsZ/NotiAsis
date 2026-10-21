@@ -1,9 +1,10 @@
 from datetime import date, timedelta
 
-from fastapi import APIRouter, BackgroundTasks, Depends
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from app.api.dependencies import get_dropi_notifier
+from app.api.dependencies import get_backend_client, get_dropi_notifier
+from app.core.interfaces import NotificationBackend
 from app.services.dropi_notifier import DropiNotificationService
 
 router = APIRouter()
@@ -33,19 +34,30 @@ class NotifyDropiRequest(BaseModel):
 
 
 @router.post("/notify-dropi-mcp", status_code=202)
-async def notify_dropi_mcp(
+def notify_dropi_mcp(
     background_tasks: BackgroundTasks,
+    business_id: int = Query(gt=0, description="Business dueño de los chats e historial"),
     body: NotifyDropiRequest | None = None,
     notifier: DropiNotificationService = Depends(get_dropi_notifier),
+    backend: NotificationBackend = Depends(get_backend_client),
 ) -> dict:
     """Notifica los pedidos de Dropi que están en "reclame en oficina".
 
     Se procesa en segundo plano (paginar los pedidos, consultar el
     detalle de los nuevos y enviar plantillas puede tardar varios minutos).
+    El business se verifica antes: con uno inexistente no se registraría
+    nada y cada corrida volvería a enviar la notificación inicial.
     """
+    exists = backend.business_exists(business_id)
+    if exists is None:
+        raise HTTPException(status_code=503, detail="No se pudo verificar el business en el backend")
+    if not exists:
+        raise HTTPException(status_code=404, detail=f"El business {business_id} no existe")
+
     filters = body or NotifyDropiRequest()
     background_tasks.add_task(
         notifier.notify_office_orders,
+        business_id,
         filters.from_date,
         filters.until,
         filters.result_number,
@@ -53,6 +65,7 @@ async def notify_dropi_mcp(
     )
     return {
         "status": "processing",
+        "business_id": business_id,
         "from": filters.from_date.isoformat(),
         "until": filters.until.isoformat(),
         "result_number": filters.result_number,

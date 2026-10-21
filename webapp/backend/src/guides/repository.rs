@@ -135,8 +135,8 @@ impl GuideRepositoryTrait for PostgresGuideRepository {
                 .map_err(|e| e.to_string())?;
 
             let insert = r#"
-                INSERT INTO guide_products (guide_number, product_id, product_name, quantity, unit_price, subtotal)
-                VALUES ($1, $2, $3, $4, $5::numeric, $6::numeric)
+                INSERT INTO guide_products (guide_number, product_id, product_name, quantity)
+                VALUES ($1, $2, $3, $4)
             "#;
 
             for product in &details.products {
@@ -145,8 +145,6 @@ impl GuideRepositoryTrait for PostgresGuideRepository {
                     .bind(product.product_id)
                     .bind(&product.product_name)
                     .bind(product.quantity)
-                    .bind(product.unit_price)
-                    .bind(product.subtotal)
                     .execute(&mut *tx)
                     .await
                     .map_err(|e| e.to_string())?;
@@ -180,8 +178,7 @@ impl GuideRepositoryTrait for PostgresGuideRepository {
             .map_err(|e| e.to_string())?;
 
         let products_query = r#"
-            SELECT guide_number, product_id, product_name, quantity,
-                   unit_price::float8 AS unit_price, subtotal::float8 AS subtotal
+            SELECT guide_number, product_id, product_name, quantity
             FROM guide_products WHERE guide_number = ANY($1)
             ORDER BY guide_number, id
         "#;

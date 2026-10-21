@@ -63,19 +63,18 @@ class DropiNotificationService:
         order_source: DropiOrderSource,
         backend: NotificationBackend,
         message_sender: MessageSender,
-        business_id: int,
         debug_notification_number: str | None = None,
         notification_override_number: str | None = None,
     ) -> None:
         self._order_source = order_source
         self._backend = backend
         self._message_sender = message_sender
-        self._business_id = business_id
         self._debug_notification_number = debug_notification_number
         self._notification_override_number = notification_override_number
 
     def notify_office_orders(
         self,
+        business_id: int,
         from_date: date,
         until_date: date,
         result_number: int = 100,
@@ -96,10 +95,10 @@ class DropiNotificationService:
                 report.errors.append("backend: no se pudieron consultar las guías")
             else:
                 for order in orders:
-                    self._process_order(order, guides.get(self._tracking(order)), report)
+                    self._process_order(business_id, order, guides.get(self._tracking(order)), report)
 
         print(
-            f"Dropi notification done for business {self._business_id}: "
+            f"Dropi notification done for business {business_id}: "
             f"{report.new_notifications} nuevas, {report.reminders} recordatorios, "
             f"{report.final_reminders} recordatorios finales, "
             f"{len(report.skipped)} omitidas, {len(report.errors)} errores, "
@@ -161,8 +160,21 @@ class DropiNotificationService:
             unique.setdefault(tracking, order)
         return list(unique.values())
 
-    def _process_order(self, order: dict, guide: dict | None, report: DropiNotificationReport) -> None:
+    def _process_order(
+        self,
+        business_id: int,
+        order: dict,
+        guide: dict | None,
+        report: DropiNotificationReport,
+    ) -> None:
         tracking = self._tracking(order)
+        if guide and guide.get("business_id") != business_id:
+            # La guía ya está en los chats de otro business: notificarla
+            # aquí mezclaría su historial con el de este.
+            print(f"Dropi guide {tracking}: belongs to business {guide.get('business_id')}, skipping")
+            report.skipped.append(tracking)
+            return
+
         try:
             count = (guide.get("notification_count") or 0) if guide else 0
             last_notified = guide.get("last_notification_timestamp") if guide else None
@@ -171,14 +183,20 @@ class DropiNotificationService:
             if step is NotificationStep.STOP:
                 report.skipped.append(tracking)
             elif step is NotificationStep.INITIAL:
-                self._send_initial(order, guide, report)
+                self._send_initial(business_id, order, guide, report)
             else:
-                self._send_reminder(order, guide, step, report)
+                self._send_reminder(business_id, order, guide, step, report)
         except Exception as e:
             print(f"Error processing Dropi guide {tracking}: {e}")
             report.errors.append(tracking)
 
-    def _send_initial(self, order: dict, guide: dict | None, report: DropiNotificationReport) -> None:
+    def _send_initial(
+        self,
+        business_id: int,
+        order: dict,
+        guide: dict | None,
+        report: DropiNotificationReport,
+    ) -> None:
         """mensaje_guia_es. Si la guía ya existe con sus datos (un envío
         anterior falló) no se consulta a Dropi ni se vuelve a registrar."""
         tracking = self._tracking(order)
@@ -201,7 +219,7 @@ class DropiNotificationService:
 
         if fetched:
             created = self._backend.register_guide(
-                tracking, recipient.phone, recipient.name, self._business_id, details=details
+                tracking, recipient.phone, recipient.name, business_id, details=details
             )
             if guide is None and not created:
                 # Carrera rara: otra corrida la registró entre la consulta y ahora.
@@ -213,12 +231,13 @@ class DropiNotificationService:
             report.errors.append(tracking)
             return
 
-        self._register_outgoing(recipient, sent)
+        self._register_outgoing(business_id, recipient, sent)
         self._backend.mark_guide_notified(tracking)
         report.new_notifications += 1
 
     def _send_reminder(
         self,
+        business_id: int,
         order: dict,
         guide: dict,
         step: NotificationStep,
@@ -242,7 +261,7 @@ class DropiNotificationService:
                 tracking,
                 self._phone(order, guide, detail_phone),
                 details.get("customer_name") or "",
-                self._business_id,
+                business_id,
                 details=details,
             )
 
@@ -261,7 +280,7 @@ class DropiNotificationService:
             report.errors.append(tracking)
             return
 
-        self._register_outgoing(recipient, sent)
+        self._register_outgoing(business_id, recipient, sent)
         self._backend.mark_guide_notified(tracking)
         if step is NotificationStep.REMINDER:
             report.reminders += 1
@@ -290,8 +309,6 @@ class DropiNotificationService:
                     "product_id": _as_int(item.get("product_id")),
                     "product_name": name,
                     "quantity": _as_int(item.get("qty")) or 1,
-                    "unit_price": _as_float(item.get("unit_price")),
-                    "subtotal": _as_float(item.get("subtotal")),
                 })
 
         details = {
@@ -370,12 +387,13 @@ class DropiNotificationService:
 
     def _register_outgoing(
         self,
+        business_id: int,
         recipient: RecipientInfo,
         sent: list[tuple[TemplateMessage, str]],
     ) -> None:
         for template, meta_message_id in sent:
             self._backend.register_outgoing_message(
-                business_id=self._business_id,
+                business_id=business_id,
                 user_phone=recipient.phone,
                 user_name=recipient.name,
                 meta_message_id=meta_message_id,
