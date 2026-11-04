@@ -7,6 +7,8 @@ servicios que dependen de abstracciones.
 
 from functools import lru_cache
 
+from fastapi import HTTPException
+
 from app.config import Settings
 from app.services.associate_directory import AssociateDirectory
 from app.services.backend_client import RustBackendClient
@@ -14,6 +16,7 @@ from app.services.dropi_client import N8nDropiClient
 from app.services.dropi_notifier import DropiNotificationService
 from app.services.google_sheets import GoogleSheetClient
 from app.services.pdf_extractor import PdfTextExtractor
+from app.services.product_videos import ProductVideoLibrary
 from app.services.recipient_extractor import DeepSeekRecipientExtractor
 from app.services.sheet_notifier import SheetNotificationService
 from app.services.shipping_notifier import ShippingNotificationService
@@ -65,12 +68,25 @@ def get_sheet_notifier() -> SheetNotificationService:
 @lru_cache
 def get_dropi_notifier() -> DropiNotificationService:
     settings = get_settings()
+    if not settings.n8n_api_key:
+        # Los webhooks de N8N rechazan las peticiones sin api-key.
+        raise HTTPException(status_code=503, detail="N8N_API_KEY no está configurado")
+
+    # Timeout amplio: subir un video (hasta 16 MB) tarda más que un envío.
+    whatsapp_client = WhatsAppClient(
+        access_token=settings.whatsapp_token,
+        phone_number_id=settings.whatsapp_phone_id,
+        timeout=120,
+    )
     return DropiNotificationService(
-        order_source=N8nDropiClient(base_url=settings.dropi_n8n_url),
+        order_source=N8nDropiClient(base_url=settings.dropi_n8n_url, api_key=settings.n8n_api_key),
         backend=get_backend_client(),
-        message_sender=WhatsAppClient(
-            access_token=settings.whatsapp_token,
-            phone_number_id=settings.whatsapp_phone_id,
+        message_sender=whatsapp_client,
+        product_videos=ProductVideoLibrary(
+            media_dir=settings.media_dir,
+            uploader=whatsapp_client,
+            cache_path=settings.media_cache_path,
+            namespace=settings.whatsapp_phone_id,
         ),
         debug_notification_number=settings.debug_notification_number,
         notification_override_number=settings.notification_override_number,

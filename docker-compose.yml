@@ -14,6 +14,12 @@ services:
       - DEBUG_NOTIFICATION_NUMBER=${DEBUG_NOTIFICATION_NUMBER:-}
       - NOTIFICATION_OVERRIDE_NUMBER=${NOTIFICATION_OVERRIDE_NUMBER:-}
       - DROPI_N8N_URL=${DROPI_N8N_URL:-}
+      - N8N_API_KEY=${N8N_API_KEY:-}
+    volumes:
+      # Videos de producto: {MEDIA_HOST_DIR}/business/{id}/products/*.mp4
+      - ${MEDIA_HOST_DIR:-/home/debian/vicky-v/media}:/data/media:ro
+      # Caché de media_id de WhatsApp (sobrevive a reinicios y deploys).
+      - bot-state:/data/state
     depends_on:
       - backend
     restart: unless-stopped
@@ -41,3 +47,6 @@ services:
     depends_on:
       - backend
     restart: unless-stopped
+
+volumes:
+  bot-state:

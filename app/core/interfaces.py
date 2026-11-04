@@ -68,10 +68,10 @@ class DropiOrderSource(ABC):
     conectados a su MCP (que tiene rate limit)."""
 
     @abstractmethod
-    def fetch_office_orders(
-        self, from_date: date, until_date: date, result_number: int, start: int
+    def fetch_orders(
+        self, status: str, from_date: date, until_date: date, result_number: int, start: int
     ) -> tuple[list[dict], int]:
-        """Una página de pedidos en "reclame en oficina": (items, count).
+        """Una página de pedidos en el estado `status`: (items, count).
 
         Lanza excepción si la consulta falla.
         """
@@ -85,8 +85,22 @@ class MediaUploader(ABC):
     """Subida de archivos multimedia al proveedor de mensajería."""
 
     @abstractmethod
-    def upload_media(self, data: bytes, filename: str) -> str | None:
+    def upload_media(self, data: bytes, filename: str, mime_type: str = "application/pdf") -> str | None:
         """Sube un archivo y retorna su media_id. None si falla."""
+
+
+class ProductVideoSource(ABC):
+    """Videos de producto listos para enviar por WhatsApp."""
+
+    @abstractmethod
+    def video_for(self, business_id: int, products: list[dict]) -> tuple[str, str] | None:
+        """(media_id, nombre del archivo) del video del primer producto
+        que tenga uno. None si ninguno tiene video o no se pudo subir."""
+
+    @abstractmethod
+    def discard(self, media_id: str) -> None:
+        """Olvida un media_id que Meta rechazó: se vuelve a subir la
+        próxima vez."""
 
 
 class RecipientInfoExtractor(ABC):

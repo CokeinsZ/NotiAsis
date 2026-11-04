@@ -15,16 +15,17 @@ class N8nDropiClient(DropiOrderSource):
     """Consulta los pedidos de Dropi a través de los webhooks de N8N
     conectados a su MCP:
 
-    - GET {base}/oficina  (body JSON: from, until, result_number, start)
+    - GET {base}/ordenes  (body JSON: from, until, result_number, start, status)
     - GET {base}/orden?order_id=...
 
-    El MCP tiene rate limit: ante 429/5xx o errores de conexión se
-    reintenta con espera exponencial.
+    Los webhooks exigen el header `api-key`. El MCP tiene rate limit: ante
+    429/5xx o errores de conexión se reintenta con espera exponencial.
     """
 
     def __init__(
         self,
         base_url: str,
+        api_key: str,
         timeout: int = 60,
         max_attempts: int = 3,
         backoff_seconds: float = 2.0,
@@ -36,18 +37,20 @@ class N8nDropiClient(DropiOrderSource):
         self._max_attempts = max_attempts
         self._backoff_seconds = backoff_seconds
         self._session = session or requests.Session()
+        self._session.headers.update({"api-key": api_key})
         self._sleep = sleep
 
-    def fetch_office_orders(
-        self, from_date: date, until_date: date, result_number: int, start: int
+    def fetch_orders(
+        self, status: str, from_date: date, until_date: date, result_number: int, start: int
     ) -> tuple[list[dict], int]:
         response = self._get(
-            "/oficina",
+            "/ordenes",
             json={
                 "from": from_date.isoformat(),
                 "until": until_date.isoformat(),
                 "result_number": result_number,
                 "start": start,
+                "status": status,
             },
         )
         response.raise_for_status()

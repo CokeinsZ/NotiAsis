@@ -1,19 +1,25 @@
 import math
 import re
+import unicodedata
 from dataclasses import dataclass, field
 from datetime import date
 
-from app.core.interfaces import DropiOrderSource, MessageSender, NotificationBackend
+from app.core.interfaces import DropiOrderSource, MessageSender, NotificationBackend, ProductVideoSource
 from app.models.shipping import RecipientInfo
-from app.services.notification_policy import NotificationStep, step_for_notification_count
+from app.services.notification_policy import NotificationStep, daily_step
 from app.whatsapp.templates.base import TemplateMessage
-from app.whatsapp.templates.mensaje_guia import MensajeGuiaTemplate
-from app.whatsapp.templates.recordatorio import RecordatorioTemplate
-from app.whatsapp.templates.recordatorio_final import RecordatorioFinalTemplate
+from app.whatsapp.templates.pedido_oficina import PedidoOficinaTemplate
+from app.whatsapp.templates.video_producto import VideoProductoTemplate
 
-# Tope de páginas de /oficina por corrida: protege contra un webhook que
+# Estado de Dropi que se notifica (filtro de /ordenes).
+OFFICE_STATUS = "RECLAME EN OFICINA"
+
+# Pedido ya pagado: la transportadora no cobra nada al entregarlo.
+PREPAID_RATE_TYPE = "SIN RECAUDO"
+
+# Tope de páginas de /ordenes por corrida: protege contra un webhook que
 # ignore `start` y devuelva siempre una página llena.
-MAX_OFFICE_PAGES = 100
+MAX_ORDER_PAGES = 100
 
 # Longitudes máximas que acepta el backend (POST /guides): un valor más
 # largo haría fallar el registro de la guía completa.
@@ -37,25 +43,32 @@ class DropiNotificationReport:
     pages: int = 0
     # Consultas a /orden: el MCP de Dropi tiene rate limit.
     order_lookups: int = 0
+    # Primera notificación (video_producto + pedido_oficina).
     new_notifications: int = 0
+    # Días siguientes (pedido_oficina).
     reminders: int = 0
-    final_reminders: int = 0
+    videos: int = 0
+    # Primeras notificaciones que salieron sin video.
+    without_video: list[str] = field(default_factory=list)
     skipped: list[str] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
 
 
 class DropiNotificationService:
-    """Notificación de los pedidos de Dropi en "reclame en oficina".
+    """Notificación diaria de los pedidos de Dropi en "reclame en oficina".
 
-    1. Pagina /oficina hasta traer todos los pedidos del rango de fechas.
+    1. Pagina /ordenes (estado OFFICE_STATUS) hasta traer todos los
+       pedidos del rango de fechas.
     2. Consulta en lote al backend qué guías (tracking_code) ya existen,
        cuántas veces se notificaron y qué datos de pedido tienen guardados.
-    3. Aplica la escalación sin PDF:
-       0 -> mensaje_guia_es, 1 -> recordatorio, 2 -> recordatorio_final.
+    3. Una notificación por guía por día, sin tope: el pedido deja de
+       notificarse cuando sale de la oficina (ya no aparece en /ordenes).
+       - Primera: video_producto (si el producto tiene video) + pedido_oficina.
+       - Siguientes: pedido_oficina.
 
     El detalle del pedido (/orden) solo se pide a Dropi cuando faltan
     datos que la plantilla necesita (en la práctica, la primera
-    notificación) y se guarda en el backend para los recordatorios.
+    notificación) y se guarda en el backend para los días siguientes.
     """
 
     def __init__(
@@ -63,12 +76,14 @@ class DropiNotificationService:
         order_source: DropiOrderSource,
         backend: NotificationBackend,
         message_sender: MessageSender,
+        product_videos: ProductVideoSource,
         debug_notification_number: str | None = None,
         notification_override_number: str | None = None,
     ) -> None:
         self._order_source = order_source
         self._backend = backend
         self._message_sender = message_sender
+        self._product_videos = product_videos
         self._debug_notification_number = debug_notification_number
         self._notification_override_number = notification_override_number
 
@@ -82,8 +97,8 @@ class DropiNotificationService:
     ) -> DropiNotificationReport:
         report = DropiNotificationReport()  #Objeto para acumular el resumen de la ejecución
 
-        orders = self._fetch_office_orders(from_date, until_date, result_number, start, report)
-        orders = self._unique_by_tracking(orders, report)
+        orders = self._fetch_orders(from_date, until_date, result_number, start, report)
+        orders = self._notifiable_orders(orders, report)
         report.total_orders = len(orders)
         print(f"Dropi {from_date}..{until_date}: {len(orders)} pedido(s) en oficina")
 
@@ -99,14 +114,18 @@ class DropiNotificationService:
 
         print(
             f"Dropi notification done for business {business_id}: "
-            f"{report.new_notifications} nuevas, {report.reminders} recordatorios, "
-            f"{report.final_reminders} recordatorios finales, "
+            f"{report.new_notifications} nuevas ({report.videos} con video), "
+            f"{report.reminders} recordatorios, "
             f"{len(report.skipped)} omitidas, {len(report.errors)} errores, "
             f"{report.order_lookups} consulta(s) de pedido en {report.pages} página(s)"
         )
+        if report.without_video:
+            print(f"Dropi: primera notificación sin video: {', '.join(report.without_video)}")
+        if report.errors:
+            print(f"Dropi: errores: {', '.join(report.errors)}")
         return report
 
-    def _fetch_office_orders(
+    def _fetch_orders(
         self,
         from_date: date,
         until_date: date,
@@ -120,16 +139,16 @@ class DropiNotificationService:
         seen: set[str] = set()
         offset = start
 
-        for _ in range(MAX_OFFICE_PAGES):
+        for _ in range(MAX_ORDER_PAGES):
             try:
-                items, count = self._order_source.fetch_office_orders(
-                    from_date, until_date, result_number, offset
+                items, count = self._order_source.fetch_orders(
+                    OFFICE_STATUS, from_date, until_date, result_number, offset
                 )
             except Exception as e:
                 # Se procesan los pedidos ya obtenidos; el resto queda para
                 # la próxima corrida.
-                print(f"Error fetching Dropi office orders (start={offset}): {e}")
-                report.errors.append(f"oficina start={offset}")
+                print(f"Error fetching Dropi orders (start={offset}): {e}")
+                report.errors.append(f"ordenes start={offset}")
                 return orders
 
             report.pages += 1
@@ -140,22 +159,27 @@ class DropiNotificationService:
             if count < result_number:
                 return orders
             if not new_items:
-                print(f"WARNING: Dropi office page start={offset} only repeated orders; stopping")
-                report.errors.append(f"oficina start={offset}: página repetida")
+                print(f"WARNING: Dropi orders page start={offset} only repeated orders; stopping")
+                report.errors.append(f"ordenes start={offset}: página repetida")
                 return orders
             offset += count
 
-        print(f"WARNING: reached {MAX_OFFICE_PAGES} pages of Dropi office orders; stopping")
-        report.errors.append(f"oficina: tope de {MAX_OFFICE_PAGES} páginas")
+        print(f"WARNING: reached {MAX_ORDER_PAGES} pages of Dropi orders; stopping")
+        report.errors.append(f"ordenes: tope de {MAX_ORDER_PAGES} páginas")
         return orders
 
-    def _unique_by_tracking(self, orders: list[dict], report: DropiNotificationReport) -> list[dict]:
-        """Descarta pedidos sin guía y repetidos: una notificación por guía."""
+    def _notifiable_orders(self, orders: list[dict], report: DropiNotificationReport) -> list[dict]:
+        """Descarta pedidos sin guía, repetidos (una notificación por guía)
+        y los que vengan en otro estado (si N8N no aplicara el filtro)."""
         unique: dict[str, dict] = {}
         for order in orders:
             tracking = self._tracking(order)
             if not tracking:
                 report.skipped.append(f"pedido {order.get('order_id') or '?'} sin guía")
+                continue
+            status = self._clean(order.get("status"))
+            if status and status.upper() != OFFICE_STATUS:
+                report.skipped.append(f"{tracking} en estado {status}")
                 continue
             unique.setdefault(tracking, order)
         return list(unique.values())
@@ -178,32 +202,34 @@ class DropiNotificationService:
         try:
             count = (guide.get("notification_count") or 0) if guide else 0
             last_notified = guide.get("last_notification_timestamp") if guide else None
-            step = step_for_notification_count(count, last_notified)
+            step = daily_step(count, last_notified)
 
             if step is NotificationStep.STOP:
                 report.skipped.append(tracking)
-            elif step is NotificationStep.INITIAL:
-                self._send_initial(business_id, order, guide, report)
             else:
-                self._send_reminder(business_id, order, guide, step, report)
+                self._notify(business_id, order, guide, step is NotificationStep.INITIAL, report)
         except Exception as e:
             print(f"Error processing Dropi guide {tracking}: {e}")
             report.errors.append(tracking)
 
-    def _send_initial(
+    def _notify(
         self,
         business_id: int,
         order: dict,
         guide: dict | None,
+        first: bool,
         report: DropiNotificationReport,
     ) -> None:
-        """mensaje_guia_es. Si la guía ya existe con sus datos (un envío
-        anterior falló) no se consulta a Dropi ni se vuelve a registrar."""
+        """Primera vez: video_producto + pedido_oficina; después solo
+        pedido_oficina. Si la guía no tiene guardados los datos del pedido
+        (es nueva, o la registró otro flujo) se consultan a Dropi una única
+        vez y se guardan. Si ya los tiene (un envío anterior falló) no se
+        consulta a Dropi ni se vuelve a registrar."""
         tracking = self._tracking(order)
         details = self._stored_details(guide)
         detail_phone = ""
 
-        fetched = not self._has_initial_data(details)
+        fetched = not self._has_order_data(details)
         if fetched:
             result = self._fetch_details(order, report)
             if result is None:
@@ -212,7 +238,8 @@ class DropiNotificationService:
             details, detail_phone = result
 
         recipient = self._build_recipient(order, details, self._phone(order, guide, detail_phone))
-        if not recipient.is_complete:
+        amount = self._amount_to_pay(order, details)
+        if not recipient.is_complete or amount is None:
             print(f"Dropi guide {tracking}: incomplete order data, skipping")
             report.skipped.append(tracking)
             return
@@ -226,66 +253,35 @@ class DropiNotificationService:
                 report.skipped.append(tracking)
                 return
 
-        sent = self._deliver(recipient, [MensajeGuiaTemplate(recipient, media_id="")])
-        if not sent:
+        templates: list[TemplateMessage] = []
+        video = self._product_videos.video_for(business_id, details.get("products") or []) if first else None
+        if video:
+            templates.append(VideoProductoTemplate(video[0]))
+        templates.append(PedidoOficinaTemplate(recipient, amount))
+
+        sent = self._deliver(recipient, templates)
+        self._register_outgoing(business_id, recipient, sent)
+        sent_names = {template.name for template, _ in sent}
+
+        video_sent = VideoProductoTemplate.TEMPLATE_NAME in sent_names
+        if video and not video_sent:
+            # Meta rechazó el media_id (p. ej. se borró antes de vencer):
+            # se vuelve a subir en la próxima primera notificación.
+            self._product_videos.discard(video[0])
+
+        if PedidoOficinaTemplate.TEMPLATE_NAME not in sent_names:
             report.errors.append(tracking)
             return
 
-        self._register_outgoing(business_id, recipient, sent)
         self._backend.mark_guide_notified(tracking)
-        report.new_notifications += 1
-
-    def _send_reminder(
-        self,
-        business_id: int,
-        order: dict,
-        guide: dict,
-        step: NotificationStep,
-        report: DropiNotificationReport,
-    ) -> None:
-        """recordatorio no lleva variables; recordatorio_final necesita el
-        producto, que sale de los datos guardados. Solo una guía registrada
-        antes de guardar esos datos (flujos de PDF o sheet) consulta el
-        pedido a Dropi, una única vez, y lo guarda."""
-        tracking = self._tracking(order)
-        details = self._stored_details(guide)
-        detail_phone = ""
-
-        if step is NotificationStep.FINAL_REMINDER and not details.get("products"):
-            result = self._fetch_details(order, report)
-            if result is None:
-                report.errors.append(tracking)
-                return
-            details, detail_phone = result
-            self._backend.register_guide(
-                tracking,
-                self._phone(order, guide, detail_phone),
-                details.get("customer_name") or "",
-                business_id,
-                details=details,
-            )
-
-        recipient = self._build_recipient(order, details, self._phone(order, guide, detail_phone))
-        if step is NotificationStep.REMINDER:
-            template: TemplateMessage = RecordatorioTemplate(recipient)
-        else:
-            if not (recipient.name and recipient.product):
-                print(f"Dropi guide {tracking}: missing name/product for recordatorio_final, skipping")
-                report.skipped.append(tracking)
-                return
-            template = RecordatorioFinalTemplate(recipient)
-
-        sent = self._deliver(recipient, [template])
-        if not sent:
-            report.errors.append(tracking)
-            return
-
-        self._register_outgoing(business_id, recipient, sent)
-        self._backend.mark_guide_notified(tracking)
-        if step is NotificationStep.REMINDER:
+        if not first:
             report.reminders += 1
+            return
+        report.new_notifications += 1
+        if video_sent:
+            report.videos += 1
         else:
-            report.final_reminders += 1
+            report.without_video.append(tracking)
 
     def _fetch_details(self, order: dict, report: DropiNotificationReport) -> tuple[dict, str] | None:
         """Consulta /orden y arma los datos del pedido en el formato del
@@ -333,23 +329,43 @@ class DropiNotificationService:
         return {**(guide.get("details") or {}), "products": guide.get("products") or []}
 
     @staticmethod
-    def _has_initial_data(details: dict) -> bool:
+    def _has_order_data(details: dict) -> bool:
         return bool(details.get("products") and (details.get("delivery_address") or details.get("city")))
 
     def _build_recipient(self, order: dict, details: dict, phone: str) -> RecipientInfo:
-        address = self._clean(details.get("delivery_address"))
-        city = self._clean(details.get("city") or order.get("city"))
-        if city and city.lower() not in address.lower():
-            address = f"{address}, {city}" if address else city
-
         products = [p["product_name"] for p in details.get("products") or [] if p.get("product_name")]
         return RecipientInfo(
             name=self._clean(details.get("customer_name") or order.get("customer_name")),
             phone=phone,
             tracking_number=self._tracking(order),
-            delivery_address=address,
+            delivery_address=self._full_address(order, details),
             product=", ".join(products),
         )
+
+    def _full_address(self, order: dict, details: dict) -> str:
+        """Dirección, ciudad y transportadora, sin repetir lo que la
+        dirección ya menciona: "Oficina Interrapidisimo, TARAZA" o
+        "ENVIA - Cra 5 # 10-20, CALI"."""
+        address = self._clean(details.get("delivery_address"))
+        city = self._clean(details.get("city") or order.get("city"))
+        carrier = self._clean(details.get("shipping_company") or order.get("shipping_company"))
+        if city and _compact(city) not in _compact(address):
+            address = f"{address}, {city}" if address else city
+        if carrier and _compact(carrier) not in _compact(address):
+            address = f"{carrier} - {address}" if address else carrier
+        return address
+
+    def _amount_to_pay(self, order: dict, details: dict) -> str | None:
+        """Valor a cobrar en la oficina con separador de miles ("84.900").
+        El total de /ordenes es el más reciente; si no viene, el guardado."""
+        if self._clean(order.get("rate_type")).upper() == PREPAID_RATE_TYPE:
+            return "0"
+        total = _as_float(order.get("total"))
+        if total is None:
+            total = _as_float(details.get("total"))
+        if total is None:
+            return None
+        return f"{round(total):,}".replace(",", ".")
 
     def _phone(self, order: dict, guide: dict | None, detail_phone: str) -> str:
         """El teléfono con el que ya existe el chat tiene prioridad."""
@@ -418,6 +434,13 @@ class DropiNotificationService:
         if limit_key:
             text = text[:FIELD_LIMITS[limit_key]]
         return text
+
+
+def _compact(text: str) -> str:
+    """Solo letras y números, sin tildes ni mayúsculas: para comparar
+    "Interrapidísimo" con "INTER RAPIDISIMO"."""
+    plain = unicodedata.normalize("NFKD", text).encode("ascii", "ignore").decode().lower()
+    return re.sub(r"[^a-z0-9]", "", plain)
 
 
 def _as_int(value) -> int | None:

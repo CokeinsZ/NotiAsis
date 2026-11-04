@@ -48,6 +48,7 @@ app/
 │   ├── sheet_notifier.py    # Notificación masiva desde el Google Sheet
 │   ├── dropi_client.py      # Cliente de los webhooks de N8N (MCP de Dropi)
 │   ├── dropi_notifier.py    # Notificación de pedidos de Dropi en oficina
+│   ├── product_videos.py    # Video de cada producto y caché de su media_id
 │   └── associate_directory.py  # Asociados autorizados en RAM (cargados del backend)
 └── api/
     ├── dependencies.py      # Composition root (inyección de dependencias)
@@ -150,34 +151,72 @@ curl -X POST "localhost:8000/notify-dropi-mcp?business_id=1" \
 ```
 
 `DROPI_N8N_URL` apunta a los webhooks de N8N (por defecto
-`https://n8n.notiasis.com/webhook/dropi`). Las guías que ya pertenecen a
-otro business se omiten. El reporte de la corrida (nuevas, recordatorios,
-omitidas, errores, consultas a `/orden`) se imprime en los logs del bot
-al terminar.
+`https://n8n.notiasis.com/webhook/dropi`) y `N8N_API_KEY` es el header
+`api-key` que exigen (obligatorio: sin él responde 503). Las guías que ya
+pertenecen a otro business se omiten. El reporte de la corrida (nuevas,
+cuántas con video, recordatorios, omitidas, errores, consultas a
+`/orden`) se imprime en los logs del bot al terminar.
 
-1. Pagina `GET {DROPI_N8N_URL}/oficina` (body JSON con los filtros):
-   mientras `count == result_number` pide la siguiente página con
-   `start += count`.
+1. Pagina `GET {DROPI_N8N_URL}/ordenes` (body JSON con los filtros y
+   `"status": "RECLAME EN OFICINA"`): mientras `count == result_number`
+   pide la siguiente página con `start += count`.
 2. Consulta en lote al backend (`POST /guides/lookup`) qué guías
    (`tracking_code`) ya existen, cuántas veces se notificaron y sus datos
    de pedido guardados.
-3. Escalación **sin PDF**:
+3. Una notificación por guía **por día, sin tope**: el pedido deja de
+   notificarse cuando sale de la oficina (ya no aparece en `/ordenes`).
 
-   | Veces notificada | Se envía |
+   | Notificación | Se envía |
    |---|---|
-   | 0 | `mensaje_guia_es` |
-   | 1 | `recordatorio` |
-   | 2 | `recordatorio_final` |
-   | 3 o más | nada |
+   | Primera (día 1) | `video_producto` (si el producto tiene video) + `pedido_oficina` |
+   | Siguientes (un día después cada una) | `pedido_oficina` |
+
+   `pedido_oficina` lleva nombre, productos, número de guía, dirección
+   completa (dirección, ciudad y transportadora si la dirección no la
+   menciona) y valor a pagar (`84.900`; `0` si la tarifa es
+   `SIN RECAUDO`).
 
 El MCP de Dropi tiene rate limit, así que el detalle del pedido
-(`GET {DROPI_N8N_URL}/orden?order_id=`) solo se consulta cuando faltan
-datos: la primera notificación de cada guía (o un `recordatorio_final`
-de una guía vieja registrada sin productos). Esos datos (cliente y
-productos) se guardan con la guía (`POST /guides` con `details`) y los
-recordatorios los leen del backend; de los productos se guardan id,
-nombre y cantidad (los precios que envía N8N se descartan). Ante
-429/5xx el cliente reintenta con espera exponencial.
+(`GET {DROPI_N8N_URL}/orden?order_id=`) solo se consulta cuando la guía
+no tiene guardados sus datos: la primera notificación (o una guía vieja
+registrada por otro flujo). Esos datos (cliente y productos) se guardan
+con la guía (`POST /guides` con `details`) y los días siguientes se leen
+del backend; de los productos se guardan id, nombre y cantidad (los
+precios que envía N8N se descartan). Ante 429/5xx el cliente reintenta
+con espera exponencial.
+
+#### Videos de producto
+
+Los videos se leen del volumen montado en el bot (`MEDIA_HOST_DIR`, por
+defecto `/home/debian/vicky-v/media` del servidor):
+
+```
+{MEDIA_HOST_DIR}/business/{business_id}/products/*.mp4
+```
+
+Para cada producto del pedido se busca, en orden:
+
+1. `{product_id}.mp4` (id de producto de Dropi): amarra el video sin
+   depender del nombre.
+2. Un archivo cuyas palabras aparezcan **todas** en el nombre del
+   producto, sin importar mayúsculas, tildes, signos ni conectores ("de",
+   "x", "the"...). Una palabra de 4 letras o más también vale dentro de
+   otra (`CLUB` en `CLUBTHE`). Si varios sirven, gana el de más palabras.
+
+| Archivo | Productos que lo usan |
+|---|---|
+| `ASAD_CLUB_DE_NUIT.mp4` | `ASAD-CLUB DE NUIT`, `COMBO ASAD X CLUB DE NUIT`, `PERFUMES ASAD+CLUBTHE NUITFULL+PERFUMERO` |
+| `CAYENNE_PEPPER.mp4` | `CAYENNE PEPPER PRIV` |
+
+Se usa el video del primer producto que tenga uno. Si ninguno tiene, la
+primera notificación sale solo con `pedido_oficina` (el log lo lista).
+WhatsApp acepta MP4 de hasta 16 MB.
+
+Cada video se sube a WhatsApp una sola vez: el `media_id` queda en un
+caché (`/data/state/whatsapp_media.json`, volumen `bot-state`) y se
+reutiliza en todos los envíos. Meta conserva el media 30 días, así que
+se vuelve a subir a los 28 días, si el archivo cambia, o si Meta rechaza
+el `media_id`.
 
 Migración: volver a correr `webapp/backend/db.sql` sobre la base
 existente (es idempotente) agrega las columnas de pedido a `guides` y la

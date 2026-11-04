@@ -14,6 +14,10 @@ más de una vez por día:
 Es una función pura compartida por el flujo del webhook (PDF por
 WhatsApp) y el del Google Sheet (notificación masiva). Las fechas se
 inyectan para que sea testeable.
+
+Los pedidos de Dropi usan `daily_step`: sin tope, una notificación por
+día mientras el pedido siga en el estado consultado (INITIAL la primera
+vez, REMINDER las siguientes).
 """
 
 from datetime import date, datetime
@@ -54,6 +58,24 @@ def step_for_notification_count(
     if notification_count < MAX_GUIDE_NOTIFICATIONS:
         return NotificationStep.FINAL_REMINDER
     return NotificationStep.STOP
+
+
+def daily_step(
+    notification_count: int,
+    last_notified_at: str | datetime | None = None,
+    today: date | None = None,
+) -> NotificationStep:
+    """Escalación sin tope: el pedido deja de notificarse cuando sale del
+    estado (ya no aparece en la consulta), no por cantidad de envíos."""
+    if today is None:
+        today = date.today()
+
+    last_notified_date = _as_date(last_notified_at)
+    if last_notified_date is not None and last_notified_date >= today:
+        return NotificationStep.STOP
+    if notification_count <= 0:
+        return NotificationStep.INITIAL
+    return NotificationStep.REMINDER
 
 
 def _as_date(value: str | datetime | None) -> date | None:
