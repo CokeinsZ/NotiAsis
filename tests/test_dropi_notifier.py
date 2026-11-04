@@ -188,6 +188,12 @@ def sent_names(sender):
     return [s[1] for s in sender.sent]
 
 
+def stored_guide(number, count, **kwargs):
+    """Guía ya notificada `count` veces, con los datos del pedido guardados."""
+    return guide(number, count=count, details=stored_details(kwargs.pop("total", 84900.0)),
+                 products=stored_products(), **kwargs)
+
+
 # ------------------------------ Paginación ------------------------------
 
 
@@ -265,7 +271,7 @@ def test_orders_page_failure_processes_orders_already_fetched():
 # ------------------------------ Escalación ------------------------------
 
 
-def test_new_guide_sends_video_then_pedido_oficina_and_stores_order():
+def test_new_guide_sends_video_then_mensaje_guia_and_stores_order():
     source = FakeDropiSource([office_order("93632719", "240063856178")],
                              details={"93632719": order_detail("93632719", "240063856178")})
     videos = FakeVideos(media_id="media-asad")
@@ -276,15 +282,14 @@ def test_new_guide_sends_video_then_pedido_oficina_and_stores_order():
     assert report.new_notifications == 1
     assert report.videos == 1
     assert source.order_calls == ["93632719"]  # única consulta al MCP
-    assert sent_names(sender) == ["video_producto", "pedido_oficina"]
+    assert sent_names(sender) == ["video_producto", "mensaje_guia_es"]
     assert videos.calls == [(BUSINESS_ID, ["Collar Girasol GIRATORIO + Caja Cuerina"])]
 
     to_number, _, text = sender.sent[1]
     assert to_number == "573105409038"
-    assert "tu pedido de Collar Girasol GIRATORIO + Caja Cuerina ya está en la oficina" in text
-    assert "El  número de guia es: 240063856178" in text
-    assert "En  la oficina de: Oficina Interrapidisimo, TARAZA" in text
-    assert "Y debes pagar: *$84.900*" in text
+    assert "Hola Cesar Ochoa," in text
+    assert ("Tu pedido 240063856178 con el producto Collar Girasol GIRATORIO + Caja Cuerina, "
+            "ya está listo para recoger en Oficina Interrapidisimo, TARAZA.") in text
 
     details = backend.registered[0]["details"]
     assert details["order_id"] == "93632719"
@@ -296,32 +301,37 @@ def test_new_guide_sends_video_then_pedido_oficina_and_stores_order():
     assert backend.notified == ["240063856178"]
 
 
-def test_new_guide_without_product_video_sends_only_pedido_oficina():
+def test_new_guide_without_product_video_sends_only_mensaje_guia():
     source = FakeDropiSource([office_order("1", "G1")], details={"1": order_detail("1", "G1")})
     service, backend, sender = build_service(source, videos=FakeVideos(media_id=None))
 
     report = service.notify_office_orders(BUSINESS_ID, FROM, UNTIL)
 
-    assert sent_names(sender) == ["pedido_oficina"]
+    assert sent_names(sender) == ["mensaje_guia_es"]
     assert report.new_notifications == 1
     assert report.videos == 0
     assert report.without_video == ["G1"]
     assert backend.notified == ["G1"]
 
 
-@pytest.mark.parametrize("count", [1, 2, 3, 10])
-def test_following_days_send_only_pedido_oficina_without_limit(count):
+@pytest.mark.parametrize("count,template,counter", [
+    (1, "recordatorio", "reminders"),  # día 2
+    (2, "recordatorio_final", "final_reminders"),  # día 3
+    (3, "pedido_oficina", "daily_reminders"),  # día 4
+    (10, "pedido_oficina", "daily_reminders"),  # sin tope
+])
+def test_following_days_escalate_then_send_pedido_oficina_without_limit(count, template, counter):
     # Sin tope: mientras el pedido siga en oficina se notifica cada día.
     source = FakeDropiSource([office_order("1", "G1")])
-    backend = FakeBackend({"G1": guide("G1", count=count, details=stored_details(), products=stored_products())})
+    backend = FakeBackend({"G1": stored_guide("G1", count)})
     videos = FakeVideos()
     service, backend, sender = build_service(source, backend, videos=videos)
 
     report = service.notify_office_orders(BUSINESS_ID, FROM, UNTIL)
 
-    assert sent_names(sender) == ["pedido_oficina"]
-    assert "Collar Girasol" in sender.sent[0][2]
-    assert report.reminders == 1
+    assert sent_names(sender) == [template]
+    assert getattr(report, counter) == 1
+    assert report.new_notifications == 0
     assert source.order_calls == []  # datos guardados: sin consultar a Dropi
     assert videos.calls == []
     assert backend.registered == []
@@ -345,16 +355,16 @@ def test_guide_notified_today_sends_nothing(count):
 def test_guide_without_stored_order_fetches_it_once_and_saves_it():
     # Guía registrada por el flujo de PDF/sheet, sin datos del pedido.
     source = FakeDropiSource([office_order("1", "G1")], details={"1": order_detail("1", "G1", product="Perfumero")})
-    backend = FakeBackend({"G1": guide("G1", count=2)})
+    backend = FakeBackend({"G1": guide("G1", count=3)})
     service, backend, sender = build_service(source, backend)
 
     report = service.notify_office_orders(BUSINESS_ID, FROM, UNTIL)
 
-    assert report.reminders == 1
+    assert report.daily_reminders == 1
     assert source.order_calls == ["1"]
     assert backend.registered[0]["details"]["products"][0]["product_name"] == "Perfumero"  # se guarda
     assert sent_names(sender) == ["pedido_oficina"]
-    assert "Perfumero" in sender.sent[0][2]
+    assert "tu pedido de Perfumero ya está en la oficina" in sender.sent[0][2]
 
 
 def test_registered_guide_never_notified_is_retried_without_dropi_or_reregistering():
@@ -369,7 +379,7 @@ def test_registered_guide_never_notified_is_retried_without_dropi_or_reregisteri
     assert report.new_notifications == 1
     assert source.order_calls == []
     assert backend.registered == []
-    assert sent_names(sender) == ["video_producto", "pedido_oficina"]
+    assert sent_names(sender) == ["video_producto", "mensaje_guia_es"]
     assert backend.notified == ["G1"]
 
 
@@ -401,9 +411,9 @@ def test_rejected_video_still_notifies_and_forgets_media_id():
     assert [m["media_type"] for m in backend.outgoing] == ["text"]
 
 
-def test_failed_pedido_oficina_does_not_mark_guide_as_notified():
+def test_failed_mensaje_guia_does_not_mark_guide_as_notified():
     source = FakeDropiSource([office_order("1", "G1")], details={"1": order_detail("1", "G1")})
-    service, backend, _ = build_service(source, sender=FakeSender(fail={"pedido_oficina"}))
+    service, backend, _ = build_service(source, sender=FakeSender(fail={"mensaje_guia_es"}))
 
     report = service.notify_office_orders(BUSINESS_ID, FROM, UNTIL)
 
@@ -413,21 +423,50 @@ def test_failed_pedido_oficina_does_not_mark_guide_as_notified():
     assert [m["media_type"] for m in backend.outgoing] == ["video"]  # el video sí salió
 
 
+@pytest.mark.parametrize("count,template", [(1, "recordatorio"), (2, "recordatorio_final"), (5, "pedido_oficina")])
+def test_failed_reminder_does_not_mark_guide_as_notified(count, template):
+    source = FakeDropiSource([office_order("1", "G1")])
+    backend = FakeBackend({"G1": stored_guide("G1", count)})
+    service, backend, _ = build_service(source, backend, sender=FakeSender(fail={template}))
+
+    report = service.notify_office_orders(BUSINESS_ID, FROM, UNTIL)
+
+    assert report.errors == ["G1"]
+    assert backend.notified == []
+    assert backend.outgoing == []
+
+
 # ------------------------------ Datos de la plantilla ------------------------------
 
 
-def test_prepaid_order_has_nothing_to_pay():
-    source = FakeDropiSource([office_order("1", "G1", rate_type="SIN RECAUDO")], details={"1": order_detail("1", "G1")})
-    service, _, sender = build_service(source)
+def test_pedido_oficina_has_full_address_and_amount():
+    source = FakeDropiSource([office_order("1", "240063856178")])
+    backend = FakeBackend({"240063856178": stored_guide("240063856178", 3)})
+    service, _, sender = build_service(source, backend)
 
     service.notify_office_orders(BUSINESS_ID, FROM, UNTIL)
 
-    assert "Y debes pagar: *$0*" in sender.sent[-1][2]
+    text = sender.sent[0][2]
+    assert "Hola Cesar Ochoa !!" in text
+    assert "tu pedido de Collar Girasol ya está en la oficina" in text
+    assert "El  número de guia es: 240063856178" in text
+    assert "En  la oficina de: Oficina Interrapidisimo, TARAZA" in text
+    assert "Y debes pagar: *$84.900*" in text
+
+
+def test_prepaid_order_has_nothing_to_pay():
+    source = FakeDropiSource([office_order("1", "G1", rate_type="SIN RECAUDO")])
+    backend = FakeBackend({"G1": stored_guide("G1", 3)})
+    service, _, sender = build_service(source, backend)
+
+    service.notify_office_orders(BUSINESS_ID, FROM, UNTIL)
+
+    assert "Y debes pagar: *$0*" in sender.sent[0][2]
 
 
 def test_amount_falls_back_to_stored_total():
     source = FakeDropiSource([office_order("1", "G1", total=None)])
-    backend = FakeBackend({"G1": guide("G1", details=stored_details(total=1234567.0), products=stored_products())})
+    backend = FakeBackend({"G1": stored_guide("G1", 3, total=1234567.0)})
     service, _, sender = build_service(source, backend)
 
     service.notify_office_orders(BUSINESS_ID, FROM, UNTIL)
@@ -435,15 +474,26 @@ def test_amount_falls_back_to_stored_total():
     assert "Y debes pagar: *$1.234.567*" in sender.sent[0][2]
 
 
-def test_order_without_total_is_skipped():
+def test_order_without_total_skips_pedido_oficina():
     source = FakeDropiSource([office_order("1", "G1", total=None)])
-    backend = FakeBackend({"G1": guide("G1", details=stored_details(total=None), products=stored_products())})
+    backend = FakeBackend({"G1": stored_guide("G1", 3, total=None)})
     service, backend, sender = build_service(source, backend)
 
     report = service.notify_office_orders(BUSINESS_ID, FROM, UNTIL)
 
     assert sender.sent == []
     assert report.skipped == ["G1"]
+
+
+@pytest.mark.parametrize("count", [0, 1, 2])
+def test_order_without_total_still_gets_templates_without_amount(count):
+    source = FakeDropiSource([office_order("1", "G1", total=None)])
+    backend = FakeBackend({"G1": stored_guide("G1", count, total=None, last=None if count == 0 else YESTERDAY)})
+    service, backend, _ = build_service(source, backend)
+
+    service.notify_office_orders(BUSINESS_ID, FROM, UNTIL)
+
+    assert backend.notified == ["G1"]
 
 
 def test_full_address_adds_carrier_when_address_does_not_mention_it():
@@ -453,7 +503,7 @@ def test_full_address_adds_carrier_when_address_does_not_mention_it():
 
     service.notify_office_orders(BUSINESS_ID, FROM, UNTIL)
 
-    assert "En  la oficina de: ENVIA - Cra 5 # 10-20 Local 3, TARAZA" in sender.sent[-1][2]
+    assert "listo para recoger en ENVIA - Cra 5 # 10-20 Local 3, TARAZA." in sender.sent[-1][2]
 
 
 def test_full_address_does_not_repeat_carrier_with_different_spelling():
@@ -463,7 +513,7 @@ def test_full_address_does_not_repeat_carrier_with_different_spelling():
 
     service.notify_office_orders(BUSINESS_ID, FROM, UNTIL)
 
-    assert "En  la oficina de: Oficina Inter Rapidísimo centro, TARAZA" in sender.sent[-1][2]
+    assert "listo para recoger en Oficina Inter Rapidísimo centro, TARAZA." in sender.sent[-1][2]
 
 
 def test_product_names_are_single_line_for_meta():
@@ -577,7 +627,9 @@ def test_override_redirects_sending_but_registers_real_recipient():
 @pytest.mark.parametrize("count,last,expected", [
     (0, None, NotificationStep.INITIAL),
     (1, "2026-11-03T20:00:00", NotificationStep.REMINDER),
-    (25, "2026-11-01T08:00:00", NotificationStep.REMINDER),  # sin tope
+    (2, "2026-11-03T20:00:00", NotificationStep.FINAL_REMINDER),
+    (3, "2026-11-03T20:00:00", NotificationStep.DAILY_REMINDER),
+    (25, "2026-11-01T08:00:00", NotificationStep.DAILY_REMINDER),  # sin tope
     (0, "2026-11-04T07:00:00", NotificationStep.STOP),  # ya se notificó hoy
     (4, "2026-11-04T23:59:59", NotificationStep.STOP),
 ])

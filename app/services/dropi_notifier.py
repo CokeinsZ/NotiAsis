@@ -8,7 +8,10 @@ from app.core.interfaces import DropiOrderSource, MessageSender, NotificationBac
 from app.models.shipping import RecipientInfo
 from app.services.notification_policy import NotificationStep, daily_step
 from app.whatsapp.templates.base import TemplateMessage
+from app.whatsapp.templates.mensaje_guia import MensajeGuiaTemplate
 from app.whatsapp.templates.pedido_oficina import PedidoOficinaTemplate
+from app.whatsapp.templates.recordatorio import RecordatorioTemplate
+from app.whatsapp.templates.recordatorio_final import RecordatorioFinalTemplate
 from app.whatsapp.templates.video_producto import VideoProductoTemplate
 
 # Estado de Dropi que se notifica (filtro de /ordenes).
@@ -43,10 +46,14 @@ class DropiNotificationReport:
     pages: int = 0
     # Consultas a /orden: el MCP de Dropi tiene rate limit.
     order_lookups: int = 0
-    # Primera notificación (video_producto + pedido_oficina).
+    # Día 1 (video_producto + mensaje_guia).
     new_notifications: int = 0
-    # Días siguientes (pedido_oficina).
+    # Día 2 (recordatorio).
     reminders: int = 0
+    # Día 3 (recordatorio_final).
+    final_reminders: int = 0
+    # Día 4 en adelante (pedido_oficina).
+    daily_reminders: int = 0
     videos: int = 0
     # Primeras notificaciones que salieron sin video.
     without_video: list[str] = field(default_factory=list)
@@ -63,8 +70,10 @@ class DropiNotificationService:
        cuántas veces se notificaron y qué datos de pedido tienen guardados.
     3. Una notificación por guía por día, sin tope: el pedido deja de
        notificarse cuando sale de la oficina (ya no aparece en /ordenes).
-       - Primera: video_producto (si el producto tiene video) + pedido_oficina.
-       - Siguientes: pedido_oficina.
+       - Día 1: video_producto (si el producto tiene video) + mensaje_guia.
+       - Día 2: recordatorio.
+       - Día 3: recordatorio_final.
+       - Día 4 en adelante: pedido_oficina.
 
     El detalle del pedido (/orden) solo se pide a Dropi cuando faltan
     datos que la plantilla necesita (en la práctica, la primera
@@ -115,7 +124,8 @@ class DropiNotificationService:
         print(
             f"Dropi notification done for business {business_id}: "
             f"{report.new_notifications} nuevas ({report.videos} con video), "
-            f"{report.reminders} recordatorios, "
+            f"{report.reminders} recordatorios, {report.final_reminders} recordatorios finales, "
+            f"{report.daily_reminders} pedido_oficina, "
             f"{len(report.skipped)} omitidas, {len(report.errors)} errores, "
             f"{report.order_lookups} consulta(s) de pedido en {report.pages} página(s)"
         )
@@ -207,7 +217,7 @@ class DropiNotificationService:
             if step is NotificationStep.STOP:
                 report.skipped.append(tracking)
             else:
-                self._notify(business_id, order, guide, step is NotificationStep.INITIAL, report)
+                self._notify(business_id, order, guide, step, report)
         except Exception as e:
             print(f"Error processing Dropi guide {tracking}: {e}")
             report.errors.append(tracking)
@@ -217,14 +227,14 @@ class DropiNotificationService:
         business_id: int,
         order: dict,
         guide: dict | None,
-        first: bool,
+        step: NotificationStep,
         report: DropiNotificationReport,
     ) -> None:
-        """Primera vez: video_producto + pedido_oficina; después solo
-        pedido_oficina. Si la guía no tiene guardados los datos del pedido
-        (es nueva, o la registró otro flujo) se consultan a Dropi una única
-        vez y se guardan. Si ya los tiene (un envío anterior falló) no se
-        consulta a Dropi ni se vuelve a registrar."""
+        """Envía las plantillas del paso (ver _templates). Si la guía no
+        tiene guardados los datos del pedido (es nueva, o la registró otro
+        flujo) se consultan a Dropi una única vez y se guardan. Si ya los
+        tiene (un envío anterior falló) no se consulta a Dropi ni se
+        vuelve a registrar."""
         tracking = self._tracking(order)
         details = self._stored_details(guide)
         detail_phone = ""
@@ -239,7 +249,8 @@ class DropiNotificationService:
 
         recipient = self._build_recipient(order, details, self._phone(order, guide, detail_phone))
         amount = self._amount_to_pay(order, details)
-        if not recipient.is_complete or amount is None:
+        # El valor a pagar solo va en pedido_oficina.
+        if not recipient.is_complete or (amount is None and step is NotificationStep.DAILY_REMINDER):
             print(f"Dropi guide {tracking}: incomplete order data, skipping")
             report.skipped.append(tracking)
             return
@@ -253,11 +264,10 @@ class DropiNotificationService:
                 report.skipped.append(tracking)
                 return
 
-        templates: list[TemplateMessage] = []
-        video = self._product_videos.video_for(business_id, details.get("products") or []) if first else None
-        if video:
-            templates.append(VideoProductoTemplate(video[0]))
-        templates.append(PedidoOficinaTemplate(recipient, amount))
+        video = None
+        if step is NotificationStep.INITIAL:
+            video = self._product_videos.video_for(business_id, details.get("products") or [])
+        templates = self._templates(step, recipient, amount, video)
 
         sent = self._deliver(recipient, templates)
         self._register_outgoing(business_id, recipient, sent)
@@ -269,19 +279,42 @@ class DropiNotificationService:
             # se vuelve a subir en la próxima primera notificación.
             self._product_videos.discard(video[0])
 
-        if PedidoOficinaTemplate.TEMPLATE_NAME not in sent_names:
+        # La notificación del día es la última plantilla: sin ella la guía
+        # no cuenta como notificada y se reintenta en la próxima corrida.
+        if templates[-1].name not in sent_names:
             report.errors.append(tracking)
             return
 
         self._backend.mark_guide_notified(tracking)
-        if not first:
+        if step is NotificationStep.REMINDER:
             report.reminders += 1
-            return
-        report.new_notifications += 1
-        if video_sent:
-            report.videos += 1
+        elif step is NotificationStep.FINAL_REMINDER:
+            report.final_reminders += 1
+        elif step is NotificationStep.DAILY_REMINDER:
+            report.daily_reminders += 1
         else:
-            report.without_video.append(tracking)
+            report.new_notifications += 1
+            if video_sent:
+                report.videos += 1
+            else:
+                report.without_video.append(tracking)
+
+    @staticmethod
+    def _templates(
+        step: NotificationStep,
+        recipient: RecipientInfo,
+        amount: str | None,
+        video: tuple[str, str] | None,
+    ) -> list[TemplateMessage]:
+        """Plantillas del paso, en orden de envío."""
+        if step is NotificationStep.INITIAL:
+            intro = [VideoProductoTemplate(video[0])] if video else []
+            return intro + [MensajeGuiaTemplate(recipient)]
+        if step is NotificationStep.REMINDER:
+            return [RecordatorioTemplate(recipient)]
+        if step is NotificationStep.FINAL_REMINDER:
+            return [RecordatorioFinalTemplate(recipient)]
+        return [PedidoOficinaTemplate(recipient, amount)]
 
     def _fetch_details(self, order: dict, report: DropiNotificationReport) -> tuple[dict, str] | None:
         """Consulta /orden y arma los datos del pedido en el formato del

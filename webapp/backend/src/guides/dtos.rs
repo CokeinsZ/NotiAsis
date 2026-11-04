@@ -150,7 +150,8 @@ pub struct GuideFilters {
 }
 
 /// Fila de estadísticas: notificaciones de guías por día y tipo
-/// (notification_count: 1=inicial, 2=recordatorio, 3=recordatorio final).
+/// (notification_count: 1=inicial, 2=recordatorio, 3=recordatorio final,
+/// 4+=seguimiento diario de pedidos de Dropi).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[derive(sqlx::FromRow)]
 pub struct DailyNotificationStat {

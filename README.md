@@ -154,8 +154,8 @@ curl -X POST "localhost:8000/notify-dropi-mcp?business_id=1" \
 `https://n8n.notiasis.com/webhook/dropi`) y `N8N_API_KEY` es el header
 `api-key` que exigen (obligatorio: sin él responde 503). Las guías que ya
 pertenecen a otro business se omiten. El reporte de la corrida (nuevas,
-cuántas con video, recordatorios, omitidas, errores, consultas a
-`/orden`) se imprime en los logs del bot al terminar.
+cuántas con video, envíos de cada plantilla, omitidas, errores,
+consultas a `/orden`) se imprime en los logs del bot al terminar.
 
 1. Pagina `GET {DROPI_N8N_URL}/ordenes` (body JSON con los filtros y
    `"status": "RECLAME EN OFICINA"`): mientras `count == result_number`
@@ -166,15 +166,22 @@ cuántas con video, recordatorios, omitidas, errores, consultas a
 3. Una notificación por guía **por día, sin tope**: el pedido deja de
    notificarse cuando sale de la oficina (ya no aparece en `/ordenes`).
 
-   | Notificación | Se envía |
+   | Notificación (`notification_count` actual) | Se envía |
    |---|---|
-   | Primera (día 1) | `video_producto` (si el producto tiene video) + `pedido_oficina` |
-   | Siguientes (un día después cada una) | `pedido_oficina` |
+   | Día 1 (0) | `video_producto` (si el producto tiene video) + `mensaje_guia_es` |
+   | Día 2 (1) | `recordatorio` |
+   | Día 3 (2) | `recordatorio_final` |
+   | Día 4 en adelante (3 o más) | `pedido_oficina` |
 
-   `pedido_oficina` lleva nombre, productos, número de guía, dirección
-   completa (dirección, ciudad y transportadora si la dirección no la
-   menciona) y valor a pagar (`84.900`; `0` si la tarifa es
-   `SIN RECAUDO`).
+   "Día N" es la N-ésima notificación: si un día el pedido no se
+   notifica, la escalación sigue donde iba. La guía cuenta como
+   notificada solo si salió la plantilla principal del día (el video es
+   opcional).
+
+   `mensaje_guia_es` y `pedido_oficina` llevan la dirección completa
+   (dirección, ciudad y transportadora si la dirección no la menciona);
+   `pedido_oficina` además el valor a pagar (`84.900`; `0` si la tarifa
+   es `SIN RECAUDO`).
 
 El MCP de Dropi tiene rate limit, así que el detalle del pedido
 (`GET {DROPI_N8N_URL}/orden?order_id=`) solo se consulta cuando la guía
@@ -209,7 +216,7 @@ Para cada producto del pedido se busca, en orden:
 | `CAYENNE_PEPPER.mp4` | `CAYENNE PEPPER PRIV` |
 
 Se usa el video del primer producto que tenga uno. Si ninguno tiene, la
-primera notificación sale solo con `pedido_oficina` (el log lo lista).
+primera notificación sale solo con `mensaje_guia_es` (el log lo lista).
 WhatsApp acepta MP4 de hasta 16 MB.
 
 Cada video se sube a WhatsApp una sola vez: el `media_id` queda en un
