@@ -4,7 +4,7 @@ Todo se prueba con dobles de prueba: sin Meta, sin DeepSeek y sin
 base de datos.
 """
 
-from app.core.phones import normalize_phone
+from app.core.phones import PhoneCountry, normalize_phone, to_international
 from app.models.shipping import RecipientInfo
 from app.services.associate_directory import AssociateDirectory
 from app.services.shipping_notifier import ShippingNotificationService
@@ -14,10 +14,16 @@ from app.whatsapp.client import WhatsAppClient
 # ------------------------------ Fakes ------------------------------
 
 
+COLOMBIA = PhoneCountry("57", 10)
+GUATEMALA = PhoneCountry("502", 8)
+
+
 class FakeBackend:
-    def __init__(self, guides_created: bool = True, guide_counts=None):
+    def __init__(self, guides_created: bool = True, guide_counts=None, countries=None):
         # guide_counts: {numero_guia: notification_count actual}
         self.guide_counts = dict(guide_counts or {})
+        # countries: {business_id: PhoneCountry}; por defecto Colombia
+        self.countries = countries or {}
         self.guides_created = guides_created
         self.guides_registered = []
         self.guides_notified = []
@@ -28,6 +34,9 @@ class FakeBackend:
 
     def fetch_authorized_associates(self):
         return self.associates
+
+    def get_business_country(self, business_id):
+        return self.countries.get(business_id, COLOMBIA)
 
     def get_guide(self, number):
         if number in self.guide_counts:
@@ -122,6 +131,14 @@ def test_normalize_phone():
     assert normalize_phone(" 573003579384 ") == "573003579384"
 
 
+def test_to_international_adds_prefix_of_business_country():
+    assert to_international("3003579384", COLOMBIA) == "573003579384"
+    assert to_international("+57 300 357 9384", COLOMBIA) == "573003579384"
+    assert to_international("5131-9585", GUATEMALA) == "50251319585"
+    assert to_international("50251319585", GUATEMALA) == "50251319585"  # ya lo trae
+    assert to_international("", GUATEMALA) == ""
+
+
 # ------------------------------ AssociateDirectory ------------------------------
 
 
@@ -177,6 +194,21 @@ def test_new_guide_sends_templates_and_registers_everything():
     assert backend.outgoing[0]["meta_message_id"] == "wamid.fake.1"
     # Guía marcada como notificada
     assert backend.guides_notified == ["GUIA123"]
+    # Cada mensaje queda ligado a la guía que notifica
+    assert {o["guide_number"] for o in backend.outgoing} == {"GUIA123"}
+
+
+def test_pdf_phone_gets_prefix_of_associate_business_country():
+    backend = FakeBackend(countries={2: GUATEMALA})
+    sender = FakeSender()
+    recipient = RecipientInfo(name="Ana", phone="51319585", tracking_number="FD45203393",
+                              delivery_address="San Jerónimo", product="Cayene Peper")
+    notifier = build_notifier(backend, sender, directory=AssociateDirectory({"50255554444": 2}), recipient=recipient)
+
+    notifier.notify_pdf_guide("MEDIA123", associate_phone="50255554444")
+
+    assert {to for to, _, _ in sender.sent} == {"50251319585"}
+    assert backend.guides_registered == [("FD45203393", "50251319585", "Ana", 2)]
 
 
 def test_guide_notified_once_gets_reminder():
@@ -302,7 +334,51 @@ def test_user_text_message_is_registered_as_incoming():
         "message": "Hola",
         "media_id": None,
         "timestamp": 1787200338,
+        "reply_to_meta_message_id": None,
     }]
+
+
+def test_quoted_reply_sends_the_quoted_message_id():
+    backend = FakeBackend()
+    processor = build_processor(backend)
+
+    # El cliente desliza para responder a una notificación: Meta manda context.id
+    processor.handle_event({
+        "entry": [{"changes": [{"value": {
+            "messages": [{
+                "context": {"from": "15550001111", "id": "wamid.notificacion1"},
+                "from": "573009998887",
+                "id": "wamid.respuesta1",
+                "timestamp": "1787200338",
+                "type": "text",
+                "text": {"body": "Hoy lo recojo"},
+            }],
+        }}]}]
+    })
+
+    assert backend.incoming[0]["reply_to_meta_message_id"] == "wamid.notificacion1"
+
+
+def test_template_button_tap_is_registered_as_text_reply():
+    backend = FakeBackend()
+    processor = build_processor(backend)
+
+    processor.handle_event({
+        "entry": [{"changes": [{"value": {
+            "messages": [{
+                "context": {"from": "15550001111", "id": "wamid.plantilla1"},
+                "from": "573009998887",
+                "id": "wamid.boton1",
+                "timestamp": "1787200338",
+                "type": "button",
+                "button": {"payload": "Sí, hoy", "text": "Sí, hoy"},
+            }],
+        }}]}]
+    })
+
+    incoming = backend.incoming[0]
+    assert (incoming["media_type"], incoming["message"]) == ("text", "Sí, hoy")
+    assert incoming["reply_to_meta_message_id"] == "wamid.plantilla1"
 
 
 def test_associate_pdf_triggers_guide_flow():

@@ -24,16 +24,18 @@ export type MessageStatus = "sent" | "delivered" | "read";
 /** Fila cruda del backend: notificaciones por día y notification_count. */
 export interface NotificationStatRow {
   day: string; // "2026-08-30"
-  notification_count: number; // 1=inicial, 2=recordatorio, 3=final
+  notification_count: number; // 1=inicial, 2=recordatorio, 3=final, 4+=diario
   total: number;
 }
 
-/** Un día de la gráfica, con los tres tipos ya pivotados. */
+/** Un día de la gráfica, con los cuatro tipos ya pivotados. */
 export interface DayStats {
   day: string;
   initial: number;
   reminder: number;
   final: number;
+  /** Seguimiento diario (pedido_oficina): notificación 4 en adelante, solo pedidos de Dropi. */
+  daily: number;
 }
 
 export interface Message {
@@ -47,4 +49,6 @@ export interface Message {
   status: MessageStatus | null;
   from_user: boolean;
   created_at: string;
+  /** Guía que notifica (saliente) o de la notificación que el cliente citó (entrante). */
+  guide_number: string | null;
 }

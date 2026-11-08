@@ -6,6 +6,7 @@ Todo con dobles de prueba: sin Google, sin Meta, sin backend real.
 import polars as pl
 import pytest
 
+from app.core.phones import PhoneCountry
 from app.services.sheet_notifier import SheetNotificationService
 
 
@@ -57,6 +58,10 @@ class FakeBackend:
         self.guides_registered = []
         self.guides_notified = []
         self.outgoing = []
+        self.country = PhoneCountry("57", 10)
+
+    def get_business_country(self, business_id):
+        return self.country
 
     def get_business_sheet(self, business_id):
         return self.sheet_config
@@ -204,6 +209,32 @@ def test_pending_guide_never_notified_sends_both_templates():
     assert backend.guides_notified == ["G3"]
     assert len(backend.outgoing) == 2
     assert backend.outgoing[0]["media_id"] == "media-1"
+    assert {o["guide_number"] for o in backend.outgoing} == {"G3"}
+
+
+def test_phones_get_prefix_of_business_country():
+    service, _, backend, sender, _ = build_service(
+        office_rows=[office_row("Ana", "5131 9585", "G4")],
+        delivered_rows=[],
+    )
+    backend.country = PhoneCountry("502", 8)  # Guatemala
+
+    service.notify_business_sheet(1)
+
+    assert {to for to, _, _ in sender.sent} == {"50251319585"}
+
+
+def test_unknown_business_country_sends_nothing():
+    service, _, backend, sender, _ = build_service(
+        office_rows=[office_row("Ana", "3117039771", "G5")],
+        delivered_rows=[],
+    )
+    backend.country = None
+
+    report = service.notify_business_sheet(1)
+
+    assert report.errors
+    assert sender.sent == []
 
 
 def test_rows_without_guide_number_are_skipped():

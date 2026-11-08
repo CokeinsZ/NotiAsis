@@ -18,6 +18,7 @@ const SERIES = [
   { key: "initial", label: "Notificación inicial", color: "bg-moon" },
   { key: "reminder", label: "Recordatorio", color: "bg-moon/50" },
   { key: "final", label: "Recordatorio final", color: "bg-white" },
+  { key: "daily", label: "Seguimiento diario", color: "bg-neutral-500" },
 ] as const;
 
 const MONTHS_SHORT = [
@@ -56,11 +57,15 @@ function generateDateRange(startDateStr: string, endDateStr: string): string[] {
   return dates;
 }
 
+function dayTotal(s: DayStats): number {
+  return s.initial + s.reminder + s.final + s.daily;
+}
+
 /** Pivota las filas del backend agrupadas por día y garantiza que todos los días del rango existan. */
 function buildDailyStats(rows: NotificationStatRow[], dateList: string[]): DayStats[] {
   const map = new Map<string, DayStats>();
   for (const dateStr of dateList) {
-    map.set(dateStr, { day: dateStr, initial: 0, reminder: 0, final: 0 });
+    map.set(dateStr, { day: dateStr, initial: 0, reminder: 0, final: 0, daily: 0 });
   }
 
   for (const row of rows) {
@@ -68,7 +73,8 @@ function buildDailyStats(rows: NotificationStatRow[], dateList: string[]): DaySt
     if (!entry) continue;
     if (row.notification_count === 1) entry.initial += row.total;
     else if (row.notification_count === 2) entry.reminder += row.total;
-    else entry.final += row.total;
+    else if (row.notification_count === 3) entry.final += row.total;
+    else entry.daily += row.total;
   }
 
   return dateList.map((d) => map.get(d)!);
@@ -152,7 +158,7 @@ export default function DashboardApp({ businessId }: { businessId: number }) {
 
   // Cálculo del total máximo para escalar las barras proporcionalmente
   const maxTotal = useMemo(() => {
-    const highest = Math.max(0, ...stats.map((s) => s.initial + s.reminder + s.final));
+    const highest = Math.max(0, ...stats.map(dayTotal));
     return Math.max(highest, 1);
   }, [stats]);
 
@@ -160,12 +166,13 @@ export default function DashboardApp({ businessId }: { businessId: number }) {
   const totals = useMemo(() => {
     return stats.reduce(
       (acc, s) => ({
-        total: acc.total + s.initial + s.reminder + s.final,
+        total: acc.total + dayTotal(s),
         initial: acc.initial + s.initial,
         reminder: acc.reminder + s.reminder,
         final: acc.final + s.final,
+        daily: acc.daily + s.daily,
       }),
-      { total: 0, initial: 0, reminder: 0, final: 0 },
+      { total: 0, initial: 0, reminder: 0, final: 0, daily: 0 },
     );
   }, [stats]);
 
@@ -357,8 +364,8 @@ export default function DashboardApp({ businessId }: { businessId: number }) {
         </section>
 
         {/* Tarjetas de totales del período seleccionado */}
-        <section className="mt-4 grid grid-cols-2 gap-3 sm:grid-cols-4">
-          <div className="rounded border border-moon/35 bg-black px-4 py-3">
+        <section className="mt-4 grid grid-cols-2 gap-3 sm:grid-cols-5">
+          <div className="col-span-2 rounded border border-moon/35 bg-black px-4 py-3 sm:col-span-1">
             <span className="text-[11px] font-medium text-neutral-400">
               Total notificaciones
             </span>
@@ -394,6 +401,16 @@ export default function DashboardApp({ businessId }: { businessId: number }) {
             </span>
             <p className="mt-1 font-mono text-2xl font-bold text-white">
               {totals.final}
+            </p>
+          </div>
+
+          <div className="rounded border border-moon/35 bg-black px-4 py-3">
+            <span className="flex items-center gap-1.5 text-[11px] font-medium text-neutral-400">
+              <span className="inline-block h-2 w-2 rounded-full bg-neutral-500" />
+              Seguimiento diario
+            </span>
+            <p className="mt-1 font-mono text-2xl font-bold text-neutral-400">
+              {totals.daily}
             </p>
           </div>
         </section>
@@ -435,9 +452,9 @@ export default function DashboardApp({ businessId }: { businessId: number }) {
                 <span className="font-medium text-white">
                   {formatDayDateString(hoveredDay.day)}
                 </span>
-                <span className="flex items-center gap-3 text-neutral-300">
+                <span className="flex flex-wrap items-center justify-end gap-x-3 text-neutral-300">
                   <span>
-                    Total: <strong className="font-mono text-white">{hoveredDay.initial + hoveredDay.reminder + hoveredDay.final}</strong>
+                    Total: <strong className="font-mono text-white">{dayTotal(hoveredDay)}</strong>
                   </span>
                   <span className="text-moon">
                     Inicial: <strong className="font-mono">{hoveredDay.initial}</strong>
@@ -447,6 +464,9 @@ export default function DashboardApp({ businessId }: { businessId: number }) {
                   </span>
                   <span className="text-white">
                     Final: <strong className="font-mono">{hoveredDay.final}</strong>
+                  </span>
+                  <span className="text-neutral-400">
+                    Diario: <strong className="font-mono">{hoveredDay.daily}</strong>
                   </span>
                 </span>
               </>
@@ -479,9 +499,9 @@ export default function DashboardApp({ businessId }: { businessId: number }) {
                 </div>
 
                 {stats.map((stat) => {
-                  const dayTotal = stat.initial + stat.reminder + stat.final;
-                  const barHeightPercent = dayTotal > 0
-                    ? Math.max(3, (dayTotal / maxTotal) * 100)
+                  const total = dayTotal(stat);
+                  const barHeightPercent = total > 0
+                    ? Math.max(3, (total / maxTotal) * 100)
                     : 0;
 
                   return (
@@ -492,14 +512,14 @@ export default function DashboardApp({ businessId }: { businessId: number }) {
                       className="group relative flex h-full flex-1 flex-col items-center justify-end px-0.5 transition-colors hover:bg-white/[0.04]"
                     >
                       {/* Valor total arriba de la barra cuando hay notificaciones */}
-                      {dayTotal > 0 && (
+                      {total > 0 && (
                         <span className="mb-1 font-mono text-[10px] text-neutral-400 transition-colors group-hover:text-white">
-                          {dayTotal}
+                          {total}
                         </span>
                       )}
 
                       {/* Barra apilada: strictly inside the h-60 plot area */}
-                      {dayTotal > 0 ? (
+                      {total > 0 ? (
                         <div
                           className="flex w-full max-w-[20px] flex-col-reverse overflow-hidden rounded-t-sm shadow-sm transition-all group-hover:brightness-110 sm:max-w-[24px]"
                           style={{ height: `${barHeightPercent}%` }}
@@ -507,19 +527,25 @@ export default function DashboardApp({ businessId }: { businessId: number }) {
                           {stat.initial > 0 && (
                             <div
                               className="w-full bg-moon transition-all"
-                              style={{ height: `${(stat.initial / dayTotal) * 100}%` }}
+                              style={{ height: `${(stat.initial / total) * 100}%` }}
                             />
                           )}
                           {stat.reminder > 0 && (
                             <div
                               className="w-full bg-moon/50 transition-all"
-                              style={{ height: `${(stat.reminder / dayTotal) * 100}%` }}
+                              style={{ height: `${(stat.reminder / total) * 100}%` }}
                             />
                           )}
                           {stat.final > 0 && (
                             <div
                               className="w-full bg-white transition-all"
-                              style={{ height: `${(stat.final / dayTotal) * 100}%` }}
+                              style={{ height: `${(stat.final / total) * 100}%` }}
+                            />
+                          )}
+                          {stat.daily > 0 && (
+                            <div
+                              className="w-full bg-neutral-500 transition-all"
+                              style={{ height: `${(stat.daily / total) * 100}%` }}
                             />
                           )}
                         </div>

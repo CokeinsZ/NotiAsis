@@ -43,15 +43,16 @@ class WhatsAppClient(MediaRepository, MessageSender, MediaUploader):
         print(f"Error downloading media: {response.text}")
         return None
 
-    def upload_media(self, data: bytes, filename: str) -> str | None:
+    def upload_media(self, data: bytes, filename: str, mime_type: str = "application/pdf") -> str | None:
         """Sube un archivo a Meta y retorna su media_id.
 
-        El media_id se usa luego en plantillas con documento y permite
-        visualizar el archivo desde la webapp.
+        El media_id se usa luego en plantillas con documento o video y
+        permite visualizar el archivo desde la webapp. Meta lo conserva
+        30 días.
         """
         url = f"{self.GRAPH_API_URL}/{self._phone_number_id}/media"
-        files = {"file": (filename, data, "application/pdf")}
-        form = {"messaging_product": "whatsapp", "type": "application/pdf"}
+        files = {"file": (filename, data, mime_type)}
+        form = {"messaging_product": "whatsapp", "type": mime_type}
         response = self._session.post(
             url, files=files, data=form, timeout=self._timeout
         )

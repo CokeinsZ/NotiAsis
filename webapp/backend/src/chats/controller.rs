@@ -383,6 +383,7 @@ mod tests {
                 status: Some(MessageStatus::Sent),
                 from_user: false,
                 created_at: chrono::Utc::now().naive_utc(),
+                guide_number: None,
             })
         }
 
@@ -414,6 +415,7 @@ mod tests {
                 status: Some(MessageStatus::Sent),
                 from_user: false,
                 created_at: chrono::Utc::now().naive_utc(),
+                guide_number: None,
             })
         }
 
@@ -430,6 +432,10 @@ mod tests {
         }
 
         async fn fetch_media(&self, _: &str) -> Result<(String, Vec<u8>), String> {
+            unimplemented!()
+        }
+
+        async fn media_belongs_to_business(&self, _: &str, _: i32) -> Result<bool, String> {
             unimplemented!()
         }
     }

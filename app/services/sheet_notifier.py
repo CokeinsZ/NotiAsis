@@ -3,6 +3,7 @@ from dataclasses import dataclass, field
 import polars as pl
 
 from app.core.interfaces import MediaUploader, MessageSender, NotificationBackend, SheetSource
+from app.core.phones import PhoneCountry, to_international
 from app.models.shipping import RecipientInfo
 from app.services.notification_policy import NotificationStep, step_for_notification_count
 from app.whatsapp.templates.base import TemplateMessage
@@ -57,6 +58,12 @@ class SheetNotificationService:
     def notify_business_sheet(self, business_id: int) -> SheetNotificationReport:
         report = SheetNotificationReport()
 
+        # La hoja trae los teléfonos sin indicativo.
+        country = self._backend.get_business_country(business_id)
+        if country is None:
+            report.errors.append(f"Business {business_id}: country unavailable")
+            return report
+
         sheet = self._backend.get_business_sheet(business_id)
         if not sheet or not sheet.get("document_id"):
             report.errors.append(f"Business {business_id} has no sheet config")
@@ -74,7 +81,7 @@ class SheetNotificationService:
         print(f"Sheet {document_id}: {pending.height} pendientes por reclamar")
 
         for row in pending.iter_rows(named=True):
-            self._process_row(business_id, row, report)
+            self._process_row(business_id, country, row, report)
 
         print(
             f"Sheet notification done for business {business_id}: "
@@ -102,8 +109,10 @@ class SheetNotificationService:
         delivered_valid = delivered.filter(pl.col("numero_guia").is_not_null() & (pl.col("numero_guia") != ""))
         return office_valid.join(delivered_valid, on="numero_guia", how="anti")
 
-    def _process_row(self, business_id: int, row: dict, report: SheetNotificationReport) -> None:
-        recipient = self._build_recipient(row)
+    def _process_row(
+        self, business_id: int, country: PhoneCountry, row: dict, report: SheetNotificationReport
+    ) -> None:
+        recipient = self._build_recipient(row, country)
         if recipient is None or not recipient.is_complete:
             report.skipped.append(str(row.get("numero_guia") or row.get("NOMBRE") or "?"))
             return
@@ -169,6 +178,7 @@ class SheetNotificationService:
                 media_type=template.media_type(),
                 message=template.log_message(),
                 media_id=template.log_media_id(),
+                guide_number=recipient.tracking_number,
             )
 
     def _send_reminder(
@@ -233,7 +243,7 @@ class SheetNotificationService:
         report.new_notifications += 1
 
     @staticmethod
-    def _build_recipient(row: dict) -> RecipientInfo | None:
+    def _build_recipient(row: dict, country: PhoneCountry) -> RecipientInfo | None:
         """Mapea una fila de la hoja office a RecipientInfo.
 
         Columnas usadas: NOMBRE, TELEFONO, DIRECCION, CIUDAD,
@@ -253,7 +263,7 @@ class SheetNotificationService:
 
         return RecipientInfo(
             name=str(row.get("NOMBRE") or "").strip(),
-            phone=str(row.get("TELEFONO") or "").strip(),
+            phone=to_international(str(row.get("TELEFONO") or ""), country),
             tracking_number=tracking,
             delivery_address=address,
             product=str(row.get("PRODUCTO") or "").strip(),

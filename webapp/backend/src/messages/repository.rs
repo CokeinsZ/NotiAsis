@@ -15,7 +15,9 @@ pub struct NewMessage {
     pub from_user: bool,
     /// Si es None, la base de datos usa CURRENT_TIMESTAMP.
     pub created_at: Option<NaiveDateTime>,
+    pub guide_number: Option<String>,
 }
+
 
 #[async_trait]
 pub trait MessageRepositoryTrait: Send + Sync {
@@ -26,6 +28,10 @@ pub trait MessageRepositoryTrait: Send + Sync {
     /// Actualiza el estado de un mensaje saliente. Nunca retrocede un
     /// mensaje ya marcado como 'read'. Retorna si se actualizó algo.
     async fn update_status_by_meta_id(&self, meta_message_id: &str, status: MessageStatus) -> Result<bool, String>;
+    async fn find_by_meta_id(&self, meta_message_id: &str) -> Result<Option<Message>, String>;
+    /// Si algún mensaje del business tiene ese media_id (para autorizar
+    /// su descarga).
+    async fn media_belongs_to_business(&self, media_id: &str, business_id: i32) -> Result<bool, String>;
 }
 
 pub struct PostgresMessageRepository {
@@ -44,13 +50,13 @@ impl MessageRepositoryTrait for PostgresMessageRepository {
         let query = r#"
             INSERT INTO messages (
                 meta_message_id, business_id, user_id,
-                media_id, media_type, message, status, from_user, created_at
+                media_id, media_type, message, status, from_user, created_at, guide_number
             ) VALUES (
-                $1, $2, $3, $4, $5, $6, $7, $8, COALESCE($9::timestamp, CURRENT_TIMESTAMP)
+                $1, $2, $3, $4, $5, $6, $7, $8, COALESCE($9::timestamp, CURRENT_TIMESTAMP), $10
             )
             ON CONFLICT (meta_message_id) DO NOTHING
             RETURNING id, meta_message_id, business_id, user_id,
-                      media_id, media_type, message, status, from_user, created_at
+                      media_id, media_type, message, status, from_user, created_at, guide_number
         "#;
 
         let inserted: Option<Message> = sqlx::query_as(query)
@@ -63,6 +69,7 @@ impl MessageRepositoryTrait for PostgresMessageRepository {
             .bind(message.status)
             .bind(message.from_user)
             .bind(message.created_at)
+            .bind(&message.guide_number)
             .fetch_optional(&self.db_pool)
             .await
             .map_err(|e| e.to_string())?;
@@ -72,23 +79,15 @@ impl MessageRepositoryTrait for PostgresMessageRepository {
         }
 
         // Webhook duplicado: el mensaje ya existía.
-        let existing = sqlx::query_as::<_, Message>(
-            r#"SELECT id, meta_message_id, business_id, user_id,
-                      media_id, media_type, message, status, from_user, created_at
-               FROM messages WHERE meta_message_id = $1"#
-        )
-            .bind(&message.meta_message_id)
-            .fetch_one(&self.db_pool)
-            .await
-            .map_err(|e| e.to_string())?;
-
-        Ok(existing)
+        self.find_by_meta_id(&message.meta_message_id)
+            .await?
+            .ok_or_else(|| format!("Message {} not found after conflict", message.meta_message_id))
     }
 
     async fn get_messages_by_chat(&self, business_id: i32, user_id: &str) -> Result<Vec<Message>, String> {
         let query = r#"
             SELECT id, meta_message_id, business_id, user_id,
-                   media_id, media_type, message, status, from_user, created_at
+                   media_id, media_type, message, status, from_user, created_at, guide_number
             FROM messages
             WHERE business_id = $1 AND user_id = $2
             ORDER BY created_at ASC, id ASC
@@ -116,5 +115,34 @@ impl MessageRepositoryTrait for PostgresMessageRepository {
             .map_err(|e| e.to_string())?;
 
         Ok(result.rows_affected() > 0)
+    }
+
+    async fn find_by_meta_id(&self, meta_message_id: &str) -> Result<Option<Message>, String> {
+        let query = r#"
+            SELECT id, meta_message_id, business_id, user_id,
+                   media_id, media_type, message, status, from_user, created_at, guide_number
+            FROM messages WHERE meta_message_id = $1
+        "#;
+
+        sqlx::query_as::<_, Message>(query)
+            .bind(meta_message_id)
+            .fetch_optional(&self.db_pool)
+            .await
+            .map_err(|e| e.to_string())
+    }
+
+    async fn media_belongs_to_business(&self, media_id: &str, business_id: i32) -> Result<bool, String> {
+        let query = r#"
+            SELECT EXISTS(SELECT 1 FROM messages WHERE media_id = $1 AND business_id = $2)
+        "#;
+
+        let result: (bool,) = sqlx::query_as(query)
+            .bind(media_id)
+            .bind(business_id)
+            .fetch_one(&self.db_pool)
+            .await
+            .map_err(|e| e.to_string())?;
+
+        Ok(result.0)
     }
 }

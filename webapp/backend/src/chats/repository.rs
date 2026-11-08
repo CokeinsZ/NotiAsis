@@ -11,8 +11,9 @@ pub trait ChatRepositoryTrait: Send + Sync {
     async fn upsert_chat(&self, business_id: i32, user_id: &str) -> Result<(), String>;
     /// Crea el chat si no existe y actualiza el último mensaje del usuario.
     async fn update_last_user_message(&self, business_id: i32, user_id: &str, message: &str, timestamp: NaiveDateTime) -> Result<(), String>;
-    /// Business del chat más reciente de un usuario (para mensajes
-    /// entrantes que no especifican business).
+    /// Business del chat del usuario con actividad más reciente (último
+    /// mensaje enviado o recibido): a quien probablemente le responde un
+    /// mensaje entrante que no cita ninguno.
     async fn find_latest_chat_business(&self, user_id: &str) -> Result<Option<i32>, String>;
     /// Marca/desmarca un chat como importante. Retorna false si no existe.
     async fn set_importance(&self, business_id: i32, user_id: &str, is_important: bool) -> Result<bool, String>;
@@ -153,10 +154,15 @@ impl ChatRepositoryTrait for PostgresChatRepository {
     }
 
     async fn find_latest_chat_business(&self, user_id: &str) -> Result<Option<i32>, String> {
+        // No usa last_guide_notification_at: se actualiza en todos los
+        // chats del usuario cuando cualquier business le notifica.
         let query = r#"
-            SELECT business_id FROM chats
-            WHERE user_id = $1
-            ORDER BY last_user_message_timestamp DESC NULLS LAST
+            SELECT c.business_id FROM chats c
+            WHERE c.user_id = $1
+            ORDER BY (
+                SELECT MAX(m.created_at) FROM messages m
+                WHERE m.business_id = c.business_id AND m.user_id = c.user_id
+            ) DESC NULLS LAST, c.business_id
             LIMIT 1
         "#;
 

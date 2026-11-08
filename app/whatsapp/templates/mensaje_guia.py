@@ -12,7 +12,7 @@ class MensajeGuiaTemplate(TemplateMessage):
 
     # media_id no se usa en esta plantilla (no adjunta documento), pero se
     # recibe para mantener la misma firma de construcción que las demás.
-    def __init__(self, recipient: RecipientInfo, media_id: str) -> None:
+    def __init__(self, recipient: RecipientInfo, media_id: str = "") -> None:
         self._recipient = recipient
         self._media_id = media_id
 

@@ -77,3 +77,38 @@ pub fn authorize_business(
         serde_json::json!({ "message": "You don't have access to this business" }),
     ))
 }
+
+/// Verifica que el token sea del bot (api_key) y no de un asociado.
+pub fn require_bot(claims: &Claims) -> Result<(), (StatusCode, Json<serde_json::Value>)> {
+    if !claims.is_associate() {
+        return Ok(());
+    }
+    Err(json_response(
+        StatusCode::FORBIDDEN,
+        serde_json::json!({ "message": "Only the bot can use this endpoint" }),
+    ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn claims(kind: &str) -> Claims {
+        Claims {
+            sub: "test".into(),
+            kind: kind.into(),
+            business_id: None,
+            phone_number: None,
+            iat: 0,
+            exp: 0,
+        }
+    }
+
+    #[test]
+    fn require_bot_accepts_only_api_key_tokens() {
+        assert!(require_bot(&claims("api_key")).is_ok());
+
+        let (status, _) = require_bot(&claims("associate")).unwrap_err();
+        assert_eq!(status, StatusCode::FORBIDDEN);
+    }
+}

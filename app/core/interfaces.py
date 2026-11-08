@@ -8,8 +8,10 @@ implementaciones concretas (principio de inversión de dependencias).
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from datetime import date
 from typing import TYPE_CHECKING
 
+from app.core.phones import PhoneCountry
 from app.models.shipping import RecipientInfo
 
 if TYPE_CHECKING:
@@ -62,12 +64,46 @@ class SheetSource(ABC):
         """Descarga un archivo público (ej. el PDF de la guía)."""
 
 
+class DropiOrderSource(ABC):
+    """Pedidos de Dropi, consultados a través de los webhooks de N8N
+    conectados a su MCP (que tiene rate limit). Cada business tiene su
+    propia cuenta de Dropi: `business_id` elige cuál se consulta."""
+
+    @abstractmethod
+    def fetch_orders(
+        self, business_id: int, status: str, from_date: date, until_date: date, result_number: int, start: int
+    ) -> tuple[list[dict], int]:
+        """Una página de pedidos en el estado `status`: (items, count).
+
+        Lanza excepción si la consulta falla.
+        """
+
+    @abstractmethod
+    def fetch_order(self, business_id: int, order_id: str) -> dict | None:
+        """Detalle de un pedido (cliente y productos). None si falla o si
+        el pedido no es de la cuenta del business."""
+
+
 class MediaUploader(ABC):
     """Subida de archivos multimedia al proveedor de mensajería."""
 
     @abstractmethod
-    def upload_media(self, data: bytes, filename: str) -> str | None:
+    def upload_media(self, data: bytes, filename: str, mime_type: str = "application/pdf") -> str | None:
         """Sube un archivo y retorna su media_id. None si falla."""
+
+
+class ProductVideoSource(ABC):
+    """Videos de producto listos para enviar por WhatsApp."""
+
+    @abstractmethod
+    def video_for(self, business_id: int, products: list[dict]) -> tuple[str, str] | None:
+        """(media_id, nombre del archivo) del video del primer producto
+        que tenga uno. None si ninguno tiene video o no se pudo subir."""
+
+    @abstractmethod
+    def discard(self, media_id: str) -> None:
+        """Olvida un media_id que Meta rechazó: se vuelve a subir la
+        próxima vez."""
 
 
 class RecipientInfoExtractor(ABC):
@@ -83,7 +119,9 @@ class NotificationBackend(ABC):
 
     Todas las operaciones son tolerantes a fallos: si el backend no
     responde, se registra el error y el flujo del bot continúa (fail-open),
-    salvo `register_guide`, cuya respuesta determina si se notifica o no.
+    salvo `register_guide`, cuya respuesta determina si se notifica o no,
+    y `lookup_guides` y `business_exists`, que retornan None para que el
+    llamador se detenga.
     """
 
     @abstractmethod
@@ -92,8 +130,18 @@ class NotificationBackend(ABC):
         autorizados a enviar guías. {} si el backend no responde."""
 
     @abstractmethod
-    def register_guide(self, number: str, user_phone: str, user_name: str, business_id: int) -> bool:
+    def register_guide(
+        self,
+        number: str,
+        user_phone: str,
+        user_name: str,
+        business_id: int,
+        details: dict | None = None,
+    ) -> bool:
         """Registra una guía recibida, asociada a su business.
+
+        `details` son los datos del pedido (cliente y productos); el
+        backend los guarda aunque la guía ya existiera.
 
         Retorna True si la guía es nueva (hay que notificar) o si el
         backend no responde (fail-open); False si ya fue registrada.
@@ -102,6 +150,21 @@ class NotificationBackend(ABC):
     @abstractmethod
     def get_guide(self, number: str) -> dict | None:
         """Consulta una guía por número. None si no existe o el backend falla."""
+
+    @abstractmethod
+    def lookup_guides(self, numbers: list[str]) -> dict[str, dict] | None:
+        """Guías existentes entre `numbers`, con sus datos de pedido
+        ({número: guía}). None si el backend falla: sin saber cuántas
+        veces se notificó cada guía no se puede decidir qué enviar."""
+
+    @abstractmethod
+    def business_exists(self, business_id: int) -> bool | None:
+        """True/False según exista el business. None si el backend falla."""
+
+    @abstractmethod
+    def get_business_country(self, business_id: int) -> PhoneCountry | None:
+        """País del business (indicativo y longitud de sus teléfonos).
+        None si no existe o el backend falla."""
 
     @abstractmethod
     def get_business_sheet(self, business_id: int) -> dict | None:
@@ -123,8 +186,14 @@ class NotificationBackend(ABC):
         message: str | None,
         media_id: str | None,
         timestamp: int | None,
+        reply_to_meta_message_id: str | None = None,
     ) -> None:
-        """Registra un mensaje entrante de un usuario final."""
+        """Registra un mensaje entrante de un usuario final.
+
+        `reply_to_meta_message_id` es el mensaje que el cliente citó al
+        responder: el backend lo usa para saber a qué business y guía
+        responde (un cliente puede tener chat con varios business).
+        """
 
     @abstractmethod
     def register_outgoing_message(
@@ -137,8 +206,10 @@ class NotificationBackend(ABC):
         media_type: str,
         message: str | None,
         media_id: str | None,
+        guide_number: str | None = None,
     ) -> None:
-        """Registra un mensaje saliente (plantilla) en el historial del chat."""
+        """Registra un mensaje saliente (plantilla) en el historial del
+        chat, con la guía que notifica."""
 
     @abstractmethod
     def update_message_status(self, meta_message_id: str, status: str) -> None:

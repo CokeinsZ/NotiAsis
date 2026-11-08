@@ -1,7 +1,7 @@
 import requests
 
 from app.core.interfaces import NotificationBackend
-from app.core.phones import normalize_phone
+from app.core.phones import PhoneCountry, normalize_phone
 
 
 class RustBackendClient(NotificationBackend):
@@ -14,6 +14,9 @@ class RustBackendClient(NotificationBackend):
     Nunca lanza excepciones: si el backend no responde, registra el error
     y deja continuar el flujo del bot (fail-open).
     """
+
+    # Máximo de guías por consulta a POST /guides/lookup (límite del backend).
+    LOOKUP_BATCH_SIZE = 500
 
     def __init__(self, base_url: str, api_key: str, timeout: int = 10) -> None:
         self._base_url = base_url.rstrip("/")
@@ -72,22 +75,28 @@ class RustBackendClient(NotificationBackend):
             print(f"Error fetching authorized associates from backend: {e}")
             return {}
 
-    def register_guide(self, number: str, user_phone: str, user_name: str, business_id: int) -> bool:
+    def register_guide(
+        self,
+        number: str,
+        user_phone: str,
+        user_name: str,
+        business_id: int,
+        details: dict | None = None,
+    ) -> bool:
+        payload = {
+            "number": number,
+            "user_phone": normalize_phone(user_phone),
+            "user_name": user_name,
+            "business_id": business_id,
+        }
+        if details:
+            payload["details"] = details
         try:
-            response = self._request(
-                "POST",
-                "/guides",
-                json={
-                    "number": number,
-                    "user_phone": normalize_phone(user_phone),
-                    "user_name": user_name,
-                    "business_id": business_id,
-                },
-            )
+            response = self._request("POST", "/guides", json=payload)
             response.raise_for_status()
             created = bool(response.json().get("created", True))
             if not created:
-                print(f"Guide {number} was already registered, skipping notification.")
+                print(f"Guide {number} was already registered.")
             return created
         except Exception as e:
             print(f"Error registering guide {number} in backend: {e}")
@@ -102,6 +111,44 @@ class RustBackendClient(NotificationBackend):
             return response.json().get("guide")
         except Exception as e:
             print(f"Error fetching guide {number} from backend: {e}")
+            return None
+
+    def lookup_guides(self, numbers: list[str]) -> dict[str, dict] | None:
+        found: dict[str, dict] = {}
+        try:
+            for i in range(0, len(numbers), self.LOOKUP_BATCH_SIZE):
+                response = self._request(
+                    "POST",
+                    "/guides/lookup",
+                    json={"numbers": numbers[i:i + self.LOOKUP_BATCH_SIZE]},
+                )
+                response.raise_for_status()
+                for guide in response.json().get("guides", []):
+                    found[guide["number"]] = guide
+            return found
+        except Exception as e:
+            print(f"Error looking up {len(numbers)} guide(s) in backend: {e}")
+            return None
+
+    def business_exists(self, business_id: int) -> bool | None:
+        try:
+            response = self._request("GET", f"/businesses/{business_id}")
+            if response.status_code == 404:
+                return False
+            response.raise_for_status()
+            return True
+        except Exception as e:
+            print(f"Error fetching business {business_id} from backend: {e}")
+            return None
+
+    def get_business_country(self, business_id: int) -> PhoneCountry | None:
+        try:
+            response = self._request("GET", f"/businesses/{business_id}")
+            response.raise_for_status()
+            country = response.json()["business"]["country"]
+            return PhoneCountry(phone_prefix=country["phone_prefix"], phone_length=int(country["phone_length"]))
+        except Exception as e:
+            print(f"Error fetching country of business {business_id}: {e}")
             return None
 
     def get_business_sheet(self, business_id: int) -> dict | None:
@@ -133,6 +180,7 @@ class RustBackendClient(NotificationBackend):
         message: str | None,
         media_id: str | None,
         timestamp: int | None,
+        reply_to_meta_message_id: str | None = None,
     ) -> None:
         try:
             response = self._request(
@@ -146,6 +194,7 @@ class RustBackendClient(NotificationBackend):
                     "message": message,
                     "media_id": media_id,
                     "timestamp": timestamp,
+                    "reply_to_meta_message_id": reply_to_meta_message_id,
                 },
             )
             if response.status_code == 404:
@@ -165,6 +214,7 @@ class RustBackendClient(NotificationBackend):
         media_type: str,
         message: str | None,
         media_id: str | None,
+        guide_number: str | None = None,
     ) -> None:
         try:
             response = self._request(
@@ -178,6 +228,7 @@ class RustBackendClient(NotificationBackend):
                     "media_type": media_type,
                     "message": message,
                     "media_id": media_id,
+                    "guide_number": guide_number,
                 },
             )
             response.raise_for_status()
