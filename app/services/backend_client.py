@@ -1,7 +1,7 @@
 import requests
 
 from app.core.interfaces import NotificationBackend
-from app.core.phones import normalize_phone
+from app.core.phones import PhoneCountry, normalize_phone
 
 
 class RustBackendClient(NotificationBackend):
@@ -141,6 +141,16 @@ class RustBackendClient(NotificationBackend):
             print(f"Error fetching business {business_id} from backend: {e}")
             return None
 
+    def get_business_country(self, business_id: int) -> PhoneCountry | None:
+        try:
+            response = self._request("GET", f"/businesses/{business_id}")
+            response.raise_for_status()
+            country = response.json()["business"]["country"]
+            return PhoneCountry(phone_prefix=country["phone_prefix"], phone_length=int(country["phone_length"]))
+        except Exception as e:
+            print(f"Error fetching country of business {business_id}: {e}")
+            return None
+
     def get_business_sheet(self, business_id: int) -> dict | None:
         try:
             response = self._request("GET", f"/businesses/{business_id}/sheet")
@@ -170,6 +180,7 @@ class RustBackendClient(NotificationBackend):
         message: str | None,
         media_id: str | None,
         timestamp: int | None,
+        reply_to_meta_message_id: str | None = None,
     ) -> None:
         try:
             response = self._request(
@@ -183,6 +194,7 @@ class RustBackendClient(NotificationBackend):
                     "message": message,
                     "media_id": media_id,
                     "timestamp": timestamp,
+                    "reply_to_meta_message_id": reply_to_meta_message_id,
                 },
             )
             if response.status_code == 404:
@@ -202,6 +214,7 @@ class RustBackendClient(NotificationBackend):
         media_type: str,
         message: str | None,
         media_id: str | None,
+        guide_number: str | None = None,
     ) -> None:
         try:
             response = self._request(
@@ -215,6 +228,7 @@ class RustBackendClient(NotificationBackend):
                     "media_type": media_type,
                     "message": message,
                     "media_id": media_id,
+                    "guide_number": guide_number,
                 },
             )
             response.raise_for_status()

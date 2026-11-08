@@ -1,3 +1,4 @@
+from dataclasses import replace
 from typing import Callable, Iterable
 
 from app.core.interfaces import (
@@ -7,6 +8,7 @@ from app.core.interfaces import (
     RecipientInfoExtractor,
     TextExtractor,
 )
+from app.core.phones import to_international
 from app.models.shipping import RecipientInfo
 from app.services.associate_directory import AssociateDirectory
 from app.services.notification_policy import NotificationStep, step_for_notification_count
@@ -99,6 +101,12 @@ class ShippingNotificationService:
                 f"Associate {associate_phone} has no business in the backend; "
                 "outgoing messages will not be registered in the chat history."
             )
+        else:
+            # El PDF trae el teléfono sin indicativo: el del país del business.
+            # Sin país (backend caído) queda la normalización por defecto.
+            country = self._backend.get_business_country(business_id)
+            if country is not None:
+                recipient = replace(recipient, phone=to_international(recipient.phone, country))
 
         tracking_number = recipient.tracking_number
         existing_guide = self._backend.get_guide(tracking_number)
@@ -168,6 +176,7 @@ class ShippingNotificationService:
                     media_type=template.media_type(),
                     message=template.log_message(),
                     media_id=template.log_media_id(),
+                    guide_number=recipient.tracking_number,
                 )
 
         return bool(sent_templates)

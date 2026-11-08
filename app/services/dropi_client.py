@@ -15,10 +15,12 @@ class N8nDropiClient(DropiOrderSource):
     """Consulta los pedidos de Dropi a través de los webhooks de N8N
     conectados a su MCP:
 
-    - GET {base}/ordenes  (body JSON: from, until, result_number, start, status)
-    - GET {base}/orden?order_id=...
+    - GET {base}/ordenes?business_id=...  (body JSON: from, until, result_number, start, status)
+    - GET {base}/orden?order_id=...&business_id=...
 
-    Los webhooks exigen el header `api-key`. El MCP tiene rate limit: ante
+    Los webhooks exigen el header `api-key`. N8N elige la credencial de
+    Dropi según `business_id`: con uno equivocado /orden falla o responde
+    que el pedido no está en la cuenta. El MCP tiene rate limit: ante
     429/5xx o errores de conexión se reintenta con espera exponencial.
     """
 
@@ -41,10 +43,11 @@ class N8nDropiClient(DropiOrderSource):
         self._sleep = sleep
 
     def fetch_orders(
-        self, status: str, from_date: date, until_date: date, result_number: int, start: int
+        self, business_id: int, status: str, from_date: date, until_date: date, result_number: int, start: int
     ) -> tuple[list[dict], int]:
         response = self._get(
             "/ordenes",
+            params={"business_id": business_id},
             json={
                 "from": from_date.isoformat(),
                 "until": until_date.isoformat(),
@@ -59,12 +62,19 @@ class N8nDropiClient(DropiOrderSource):
         count = data.get("count")
         return items, int(count) if count is not None else len(items)
 
-    def fetch_order(self, order_id: str) -> dict | None:
+    def fetch_order(self, business_id: int, order_id: str) -> dict | None:
         try:
-            response = self._get("/orden", params={"order_id": order_id})
+            response = self._get("/orden", params={"order_id": order_id, "business_id": business_id})
             if response.status_code == 200:
-                return response.json()
-            print(f"Error fetching Dropi order {order_id} ({response.status_code}): {response.text}")
+                order = response.json()
+                # Un pedido de otra cuenta llega como mensaje, no como pedido:
+                # {"la orden 1784924 no está en tu cuenta": "..."}
+                if isinstance(order, dict) and str(order.get("order_id")) == str(order_id):
+                    return order
+            print(
+                f"Error fetching Dropi order {order_id} for business {business_id} "
+                f"({response.status_code}): {response.text}"
+            )
             return None
         except Exception as e:
             print(f"Error fetching Dropi order {order_id}: {e}")

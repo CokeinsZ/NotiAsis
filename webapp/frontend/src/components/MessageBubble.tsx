@@ -62,6 +62,11 @@ export default function MessageBubble({ message }: { message: Message }) {
           <MessageContent message={message} />
         </p>
         <div className="mt-1 flex items-center justify-end gap-1 text-[10px] text-neutral-500">
+          {message.guide_number && (
+            <span className="mr-auto pr-2 font-mono text-moon/70">
+              {fromUser ? `Responde a la guía ${message.guide_number}` : `Guía ${message.guide_number}`}
+            </span>
+          )}
           <div className="group/time relative inline-flex items-center">
             <span
               title={formatFullDateTime(message.created_at)}

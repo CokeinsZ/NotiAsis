@@ -7,6 +7,9 @@ from app.services.shipping_notifier import ShippingNotificationService
 # Tipos de mensaje de Meta que el backend soporta en media_type_enum.
 SUPPORTED_MEDIA_TYPES = ("text", "document", "audio", "image", "video")
 
+# Toque de un botón de respuesta rápida de una plantilla: se guarda como texto.
+BUTTON_TYPE = "button"
+
 # Estados de mensajes salientes que Meta reporta en los webhooks.
 SUPPORTED_STATUSES = ("sent", "delivered", "read")
 
@@ -91,7 +94,8 @@ class WhatsAppWebhookProcessor:
     def _handle_user_message(self, message: dict, contact_name: str | None) -> None:
         """Mensaje de un usuario final: se registra en el historial del chat."""
         message_type = message.get("type", "")
-        if message_type not in SUPPORTED_MEDIA_TYPES:
+        media_type = "text" if message_type == BUTTON_TYPE else message_type
+        if media_type not in SUPPORTED_MEDIA_TYPES:
             print(f"Unsupported message type from user: {message_type}")
             return
 
@@ -107,10 +111,13 @@ class WhatsAppWebhookProcessor:
             user_phone=user_phone,
             user_name=contact_name,
             meta_message_id=meta_message_id,
-            media_type=message_type,
+            media_type=media_type,
             message=text,
             media_id=media_id,
             timestamp=int(timestamp) if timestamp else None,
+            # Mensaje citado al responder (o plantilla del botón tocado):
+            # dice a qué business y guía responde el cliente.
+            reply_to_meta_message_id=(message.get("context") or {}).get("id"),
         )
 
     @staticmethod
@@ -118,5 +125,7 @@ class WhatsAppWebhookProcessor:
         """Extrae (texto, media_id) según el tipo de mensaje de Meta."""
         if message_type == "text":
             return message.get("text", {}).get("body"), None
+        if message_type == BUTTON_TYPE:
+            return message.get("button", {}).get("text"), None
         content = message.get(message_type, {})
         return content.get("caption"), content.get("id")

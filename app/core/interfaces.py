@@ -11,6 +11,7 @@ from abc import ABC, abstractmethod
 from datetime import date
 from typing import TYPE_CHECKING
 
+from app.core.phones import PhoneCountry
 from app.models.shipping import RecipientInfo
 
 if TYPE_CHECKING:
@@ -65,11 +66,12 @@ class SheetSource(ABC):
 
 class DropiOrderSource(ABC):
     """Pedidos de Dropi, consultados a través de los webhooks de N8N
-    conectados a su MCP (que tiene rate limit)."""
+    conectados a su MCP (que tiene rate limit). Cada business tiene su
+    propia cuenta de Dropi: `business_id` elige cuál se consulta."""
 
     @abstractmethod
     def fetch_orders(
-        self, status: str, from_date: date, until_date: date, result_number: int, start: int
+        self, business_id: int, status: str, from_date: date, until_date: date, result_number: int, start: int
     ) -> tuple[list[dict], int]:
         """Una página de pedidos en el estado `status`: (items, count).
 
@@ -77,8 +79,9 @@ class DropiOrderSource(ABC):
         """
 
     @abstractmethod
-    def fetch_order(self, order_id: str) -> dict | None:
-        """Detalle de un pedido (cliente y productos). None si falla."""
+    def fetch_order(self, business_id: int, order_id: str) -> dict | None:
+        """Detalle de un pedido (cliente y productos). None si falla o si
+        el pedido no es de la cuenta del business."""
 
 
 class MediaUploader(ABC):
@@ -159,6 +162,11 @@ class NotificationBackend(ABC):
         """True/False según exista el business. None si el backend falla."""
 
     @abstractmethod
+    def get_business_country(self, business_id: int) -> PhoneCountry | None:
+        """País del business (indicativo y longitud de sus teléfonos).
+        None si no existe o el backend falla."""
+
+    @abstractmethod
     def get_business_sheet(self, business_id: int) -> dict | None:
         """Configuración del Google Sheet del business (document_id,
         office_id, delivered_id). None si no existe o el backend falla."""
@@ -178,8 +186,14 @@ class NotificationBackend(ABC):
         message: str | None,
         media_id: str | None,
         timestamp: int | None,
+        reply_to_meta_message_id: str | None = None,
     ) -> None:
-        """Registra un mensaje entrante de un usuario final."""
+        """Registra un mensaje entrante de un usuario final.
+
+        `reply_to_meta_message_id` es el mensaje que el cliente citó al
+        responder: el backend lo usa para saber a qué business y guía
+        responde (un cliente puede tener chat con varios business).
+        """
 
     @abstractmethod
     def register_outgoing_message(
@@ -192,8 +206,10 @@ class NotificationBackend(ABC):
         media_type: str,
         message: str | None,
         media_id: str | None,
+        guide_number: str | None = None,
     ) -> None:
-        """Registra un mensaje saliente (plantilla) en el historial del chat."""
+        """Registra un mensaje saliente (plantilla) en el historial del
+        chat, con la guía que notifica."""
 
     @abstractmethod
     def update_message_status(self, meta_message_id: str, status: str) -> None:

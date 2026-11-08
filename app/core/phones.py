@@ -1,3 +1,7 @@
+import re
+from dataclasses import dataclass
+
+
 def normalize_phone(phone: str) -> str:
     """Normaliza un número de teléfono colombiano al formato sin '+'
     (ej. 573001234567).
@@ -11,3 +15,25 @@ def normalize_phone(phone: str) -> str:
     if len(normalized) == 10 and normalized.isdigit():
         normalized = f"57{normalized}"
     return normalized
+
+
+@dataclass(frozen=True)
+class PhoneCountry:
+    """Indicativo y longitud del número nacional del país de un business
+    (tabla countries del backend)."""
+
+    phone_prefix: str
+    phone_length: int
+
+
+def to_international(phone: str, country: PhoneCountry) -> str:
+    """Teléfono sin '+' con el indicativo del país: un número nacional
+    ("51319585" en Guatemala) lo recibe; uno que ya lo trae queda igual.
+
+    Los teléfonos de Dropi, del Google Sheet y de los PDF llegan sin
+    indicativo; los de los webhooks de Meta ya lo traen.
+    """
+    digits = re.sub(r"\D", "", str(phone or ""))
+    if len(digits) == country.phone_length:
+        return country.phone_prefix + digits
+    return digits

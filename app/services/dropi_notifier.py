@@ -5,6 +5,7 @@ from dataclasses import dataclass, field
 from datetime import date
 
 from app.core.interfaces import DropiOrderSource, MessageSender, NotificationBackend, ProductVideoSource
+from app.core.phones import PhoneCountry, to_international
 from app.models.shipping import RecipientInfo
 from app.services.notification_policy import NotificationStep, daily_step
 from app.whatsapp.templates.base import TemplateMessage
@@ -106,7 +107,15 @@ class DropiNotificationService:
     ) -> DropiNotificationReport:
         report = DropiNotificationReport()  #Objeto para acumular el resumen de la ejecución
 
-        orders = self._fetch_orders(from_date, until_date, result_number, start, report)
+        # Los teléfonos de Dropi llegan sin indicativo: sin el país del
+        # business no se sabe cuál ponerles.
+        country = self._backend.get_business_country(business_id)
+        if country is None:
+            report.errors.append("backend: no se pudo consultar el país del business")
+            print(f"Dropi notification aborted for business {business_id}: country unavailable")
+            return report
+
+        orders = self._fetch_orders(business_id, from_date, until_date, result_number, start, report)
         orders = self._notifiable_orders(orders, report)
         report.total_orders = len(orders)
         print(f"Dropi {from_date}..{until_date}: {len(orders)} pedido(s) en oficina")
@@ -119,7 +128,7 @@ class DropiNotificationService:
                 report.errors.append("backend: no se pudieron consultar las guías")
             else:
                 for order in orders:
-                    self._process_order(business_id, order, guides.get(self._tracking(order)), report)
+                    self._process_order(business_id, country, order, guides.get(self._tracking(order)), report)
 
         print(
             f"Dropi notification done for business {business_id}: "
@@ -137,6 +146,7 @@ class DropiNotificationService:
 
     def _fetch_orders(
         self,
+        business_id: int,
         from_date: date,
         until_date: date,
         result_number: int,
@@ -152,7 +162,7 @@ class DropiNotificationService:
         for _ in range(MAX_ORDER_PAGES):
             try:
                 items, count = self._order_source.fetch_orders(
-                    OFFICE_STATUS, from_date, until_date, result_number, offset
+                    business_id, OFFICE_STATUS, from_date, until_date, result_number, offset
                 )
             except Exception as e:
                 # Se procesan los pedidos ya obtenidos; el resto queda para
@@ -197,6 +207,7 @@ class DropiNotificationService:
     def _process_order(
         self,
         business_id: int,
+        country: PhoneCountry,
         order: dict,
         guide: dict | None,
         report: DropiNotificationReport,
@@ -217,7 +228,7 @@ class DropiNotificationService:
             if step is NotificationStep.STOP:
                 report.skipped.append(tracking)
             else:
-                self._notify(business_id, order, guide, step, report)
+                self._notify(business_id, country, order, guide, step, report)
         except Exception as e:
             print(f"Error processing Dropi guide {tracking}: {e}")
             report.errors.append(tracking)
@@ -225,6 +236,7 @@ class DropiNotificationService:
     def _notify(
         self,
         business_id: int,
+        country: PhoneCountry,
         order: dict,
         guide: dict | None,
         step: NotificationStep,
@@ -241,13 +253,13 @@ class DropiNotificationService:
 
         fetched = not self._has_order_data(details)
         if fetched:
-            result = self._fetch_details(order, report)
+            result = self._fetch_details(business_id, order, report)
             if result is None:
                 report.errors.append(tracking)
                 return
             details, detail_phone = result
 
-        recipient = self._build_recipient(order, details, self._phone(order, guide, detail_phone))
+        recipient = self._build_recipient(order, details, self._phone(order, guide, detail_phone, country))
         amount = self._amount_to_pay(order, details)
         # El valor a pagar solo va en pedido_oficina.
         if not recipient.is_complete or (amount is None and step is NotificationStep.DAILY_REMINDER):
@@ -316,7 +328,9 @@ class DropiNotificationService:
             return [RecordatorioFinalTemplate(recipient)]
         return [PedidoOficinaTemplate(recipient, amount)]
 
-    def _fetch_details(self, order: dict, report: DropiNotificationReport) -> tuple[dict, str] | None:
+    def _fetch_details(
+        self, business_id: int, order: dict, report: DropiNotificationReport
+    ) -> tuple[dict, str] | None:
         """Consulta /orden y arma los datos del pedido en el formato del
         backend. Retorna (datos, teléfono del cliente) o None si falla."""
         order_id = self._clean(order.get("order_id"), "order_id")
@@ -325,7 +339,7 @@ class DropiNotificationService:
             return None
 
         report.order_lookups += 1
-        detail = self._order_source.fetch_order(order_id)
+        detail = self._order_source.fetch_order(business_id, order_id)
         if not detail:
             return None
 
@@ -400,10 +414,11 @@ class DropiNotificationService:
             return None
         return f"{round(total):,}".replace(",", ".")
 
-    def _phone(self, order: dict, guide: dict | None, detail_phone: str) -> str:
-        """El teléfono con el que ya existe el chat tiene prioridad."""
+    def _phone(self, order: dict, guide: dict | None, detail_phone: str, country: PhoneCountry) -> str:
+        """El teléfono con el que ya existe el chat tiene prioridad. Los de
+        Dropi llegan sin indicativo: se les pone el del país del business."""
         phone = (guide or {}).get("user_id") or order.get("customer_phone") or detail_phone
-        return re.sub(r"[^\d+]", "", str(phone or ""))
+        return to_international(phone, country)
 
     def _deliver(
         self,
@@ -449,6 +464,7 @@ class DropiNotificationService:
                 media_type=template.media_type(),
                 message=template.log_message(),
                 media_id=template.log_media_id(),
+                guide_number=recipient.tracking_number,
             )
 
     @classmethod

@@ -334,6 +334,7 @@ pub trait MessageServiceTrait: Send + Sync {
     /// Descarga multimedia de Meta en memoria (sin tocar disco) para
     /// visualizarla/reproducirla en el navegador.
     async fn fetch_media(&self, media_id: &str) -> Result<(String, Vec<u8>), String>;
+    async fn media_belongs_to_business(&self, media_id: &str, business_id: i32) -> Result<bool, String>;
 }
 
 pub struct MessageService {
@@ -394,6 +395,7 @@ impl MessageServiceTrait for MessageService {
             status: Some(MessageStatus::Sent),
             from_user: false,
             created_at: None,
+            guide_number: None,
         };
 
         self.message_repository.save_message(&new_message).await
@@ -464,6 +466,7 @@ impl MessageServiceTrait for MessageService {
             status: Some(MessageStatus::Sent),
             from_user: false,
             created_at: None,
+            guide_number: None,
         };
 
         self.message_repository.save_message(&new_message).await
@@ -476,13 +479,28 @@ impl MessageServiceTrait for MessageService {
             .upsert_user(&user_phone, dto.user_name.as_deref().unwrap_or(""))
             .await?;
 
-        let business_id = match dto.business_id {
-            Some(id) => id,
-            None => self.chat_repository
+        // Un mensaje citado (o el botón de una plantilla) dice exactamente a
+        // qué business y guía responde el cliente. Solo cuenta si es de su
+        // propio chat.
+        let replied = match &dto.reply_to_meta_message_id {
+            Some(meta_id) => self.message_repository
+                .find_by_meta_id(meta_id)
+                .await?
+                .filter(|message| message.user_id == user_phone),
+            None => None,
+        };
+
+        let business_id = match (dto.business_id, &replied) {
+            (Some(id), _) => id,
+            (None, Some(message)) => message.business_id,
+            (None, None) => self.chat_repository
                 .find_latest_chat_business(&user_phone)
                 .await?
                 .ok_or_else(|| "Chat not found for user".to_string())?,
         };
+        let guide_number = replied
+            .filter(|message| message.business_id == business_id)
+            .and_then(|message| message.guide_number);
 
         let timestamp = dto.timestamp
             .and_then(|secs| chrono::DateTime::from_timestamp(secs, 0))
@@ -508,6 +526,7 @@ impl MessageServiceTrait for MessageService {
             status: None, // los estados solo aplican a mensajes salientes
             from_user: true,
             created_at: Some(timestamp),
+            guide_number,
         };
 
         self.message_repository.save_message(&new_message).await
@@ -534,6 +553,7 @@ impl MessageServiceTrait for MessageService {
             status: Some(MessageStatus::Sent),
             from_user: false,
             created_at: None,
+            guide_number: dto.guide_number,
         };
 
         self.message_repository.save_message(&new_message).await
@@ -552,6 +572,10 @@ impl MessageServiceTrait for MessageService {
     async fn fetch_media(&self, media_id: &str) -> Result<(String, Vec<u8>), String> {
         self.meta_client.fetch_media(media_id).await
     }
+
+    async fn media_belongs_to_business(&self, media_id: &str, business_id: i32) -> Result<bool, String> {
+        self.message_repository.media_belongs_to_business(media_id, business_id).await
+    }
 }
 
 #[cfg(test)]
@@ -565,11 +589,12 @@ mod tests {
 
     struct FakeMessageRepository {
         saved: Mutex<Vec<NewMessage>>,
+        rows: Mutex<Vec<Message>>,
     }
 
     impl FakeMessageRepository {
         fn new() -> Self {
-            Self { saved: Mutex::new(Vec::new()) }
+            Self { saved: Mutex::new(Vec::new()), rows: Mutex::new(Vec::new()) }
         }
     }
 
@@ -587,7 +612,9 @@ mod tests {
                 status: message.status,
                 from_user: message.from_user,
                 created_at: message.created_at.unwrap_or_else(|| chrono::Utc::now().naive_utc()),
+                guide_number: message.guide_number.clone(),
             };
+            self.rows.lock().unwrap().push(row.clone());
             self.saved.lock().unwrap().push(NewMessage {
                 meta_message_id: message.meta_message_id.clone(),
                 business_id: message.business_id,
@@ -598,6 +625,7 @@ mod tests {
                 status: message.status,
                 from_user: message.from_user,
                 created_at: message.created_at,
+                guide_number: message.guide_number.clone(),
             });
             Ok(row)
         }
@@ -608,6 +636,15 @@ mod tests {
 
         async fn update_status_by_meta_id(&self, _: &str, _: MessageStatus) -> Result<bool, String> {
             Ok(true)
+        }
+
+        async fn find_by_meta_id(&self, meta_message_id: &str) -> Result<Option<Message>, String> {
+            Ok(self.rows.lock().unwrap().iter().find(|m| m.meta_message_id == meta_message_id).cloned())
+        }
+
+        async fn media_belongs_to_business(&self, media_id: &str, business_id: i32) -> Result<bool, String> {
+            Ok(self.rows.lock().unwrap().iter()
+                .any(|m| m.media_id.as_deref() == Some(media_id) && m.business_id == business_id))
         }
     }
 
@@ -847,6 +884,7 @@ mod tests {
             user_phone: "573003579384".into(),
             user_name: Some("Stiven".into()),
             business_id: Some(7),
+            reply_to_meta_message_id: None,
             meta_message_id: "wamid.in1".into(),
             media_type: MediaType::Text,
             message: Some("Hola".into()),
@@ -869,6 +907,7 @@ mod tests {
             user_phone: "573003579384".into(),
             user_name: None,
             business_id: Some(1),
+            reply_to_meta_message_id: None,
             meta_message_id: "wamid.in2".into(),
             media_type: MediaType::Audio,
             message: None,
@@ -888,6 +927,7 @@ mod tests {
             user_phone: "573003579384".into(),
             user_name: None,
             business_id: None,
+            reply_to_meta_message_id: None,
             meta_message_id: "wamid.in3".into(),
             media_type: MediaType::Text,
             message: Some("Hola".into()),
@@ -906,6 +946,7 @@ mod tests {
             user_phone: "573003579384".into(),
             user_name: None,
             business_id: None,
+            reply_to_meta_message_id: None,
             meta_message_id: "wamid.in4".into(),
             media_type: MediaType::Text,
             message: Some("Hola".into()),
@@ -919,6 +960,73 @@ mod tests {
 
     // ---------- Tests de register_outgoing ----------
 
+    fn notification(business_id: i32, meta_message_id: &str, guide: &str) -> OutgoingMessageDto {
+        OutgoingMessageDto {
+            business_id,
+            user_phone: "573003579384".into(),
+            user_name: None,
+            meta_message_id: meta_message_id.into(),
+            media_type: MediaType::Text,
+            message: Some("Tu pedido ya está en la oficina".into()),
+            media_id: None,
+            guide_number: Some(guide.into()),
+        }
+    }
+
+    fn reply(meta_message_id: &str, reply_to: Option<&str>) -> IncomingMessageDto {
+        IncomingMessageDto {
+            user_phone: "573003579384".into(),
+            user_name: None,
+            business_id: None,
+            reply_to_meta_message_id: reply_to.map(Into::into),
+            meta_message_id: meta_message_id.into(),
+            media_type: MediaType::Text,
+            message: Some("Hoy lo recojo".into()),
+            media_id: None,
+            timestamp: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn quoted_reply_goes_to_business_and_guide_of_quoted_notification() {
+        // Dos business le notificaron al mismo cliente; el chat "más
+        // reciente" sería el del business 1, pero cita la notificación del 2.
+        let (service, message_repo, _, _) = build_service(vec![]);
+        service.register_outgoing(notification(1, "wamid.b1", "G-B1")).await.unwrap();
+        service.register_outgoing(notification(2, "wamid.b2", "G-B2")).await.unwrap();
+
+        let message = service.register_incoming(reply("wamid.in", Some("wamid.b2"))).await.unwrap();
+
+        assert_eq!(message.business_id, 2);
+        assert_eq!(message.guide_number.as_deref(), Some("G-B2"));
+        assert_eq!(message_repo.saved.lock().unwrap()[2].guide_number.as_deref(), Some("G-B2"));
+    }
+
+    #[tokio::test]
+    async fn reply_without_known_quote_uses_latest_chat() {
+        let (service, _, _, _) = build_service(vec![]);
+        service.register_outgoing(notification(1, "wamid.b1", "G-B1")).await.unwrap();
+
+        let unknown = service.register_incoming(reply("wamid.in1", Some("wamid.otro"))).await.unwrap();
+        let plain = service.register_incoming(reply("wamid.in2", None)).await.unwrap();
+
+        assert_eq!((unknown.business_id, unknown.guide_number), (1, None));
+        assert_eq!((plain.business_id, plain.guide_number), (1, None));
+    }
+
+    #[tokio::test]
+    async fn quote_of_another_users_message_is_ignored() {
+        let (service, _, _, _) = build_service(vec![]);
+        service.register_outgoing(notification(1, "wamid.b1", "G-B1")).await.unwrap();
+        let mut other_user = notification(2, "wamid.otro", "G-OTRO");
+        other_user.user_phone = "573001112233".into();
+        service.register_outgoing(other_user).await.unwrap();
+
+        let message = service.register_incoming(reply("wamid.in", Some("wamid.otro"))).await.unwrap();
+
+        assert_eq!((message.business_id, message.guide_number), (1, None));
+    }
+
     #[tokio::test]
     async fn outgoing_message_creates_chat_if_missing() {
         let (service, _, chat_repo, _) = build_service(Vec::new());
@@ -931,6 +1039,7 @@ mod tests {
             media_type: MediaType::Document,
             message: None,
             media_id: Some("media123".into()),
+            guide_number: Some("240065263700".into()),
         };
         let message = service.register_outgoing(dto).await.unwrap();
 

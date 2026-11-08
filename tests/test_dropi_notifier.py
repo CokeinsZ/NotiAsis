@@ -3,6 +3,8 @@
 Todo con dobles de prueba: sin N8N, sin Meta, sin backend real.
 """
 
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from datetime import date, datetime, timedelta
 
 import pytest
@@ -10,12 +12,14 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from pydantic import ValidationError
 
-from app.api.dependencies import get_backend_client, get_dropi_notifier
+from app.api.dependencies import get_backend_client, get_dropi_notifier, get_dropi_runs
 from app.api.notify_dropi import NotifyDropiRequest, router as notify_dropi_router
+from app.core.phones import PhoneCountry
 from app.models.shipping import RecipientInfo
 from app.services.dropi_client import N8nDropiClient
 from app.services.dropi_notifier import OFFICE_STATUS, DropiNotificationService
 from app.services.notification_policy import NotificationStep, daily_step
+from app.services.run_guard import RunGuard
 from app.whatsapp.templates.pedido_oficina import PedidoOficinaTemplate
 from app.whatsapp.templates.video_producto import VideoProductoTemplate
 
@@ -39,8 +43,10 @@ class FakeDropiSource:
         self.ignore_start = ignore_start
         self.order_list_calls = []
         self.order_calls = []
+        self.business_ids = set()  # cuentas de Dropi consultadas
 
-    def fetch_orders(self, status, from_date, until_date, result_number, start):
+    def fetch_orders(self, business_id, status, from_date, until_date, result_number, start):
+        self.business_ids.add(business_id)
         self.order_list_calls.append((status, from_date, until_date, result_number, start))
         if start == self.fail_on_start:
             raise Exception("N8N timeout")
@@ -48,20 +54,28 @@ class FakeDropiSource:
         page = self.orders[offset:offset + result_number]
         return page, len(page)
 
-    def fetch_order(self, order_id):
+    def fetch_order(self, business_id, order_id):
+        self.business_ids.add(business_id)
         self.order_calls.append(order_id)
         return self.details.get(order_id)
 
 
+COLOMBIA = PhoneCountry("57", 10)
+
+
 class FakeBackend:
-    def __init__(self, guides=None, lookup_fails=False):
+    def __init__(self, guides=None, lookup_fails=False, country=COLOMBIA):
         # guides: {número: guía con el formato de POST /guides/lookup}
         self.guides = guides or {}
         self.lookup_fails = lookup_fails
+        self.country = country
         self.lookups = []
         self.registered = []
         self.notified = []
         self.outgoing = []
+
+    def get_business_country(self, business_id):
+        return self.country
 
     def lookup_guides(self, numbers):
         self.lookups.append(list(numbers))
@@ -296,8 +310,9 @@ def test_new_guide_sends_video_then_mensaje_guia_and_stores_order():
     assert details["products"] == [{"product_id": 2298431, "product_name": "Collar Girasol GIRATORIO + Caja Cuerina",
                                     "quantity": 1}]  # los precios de N8N no se guardan
 
-    # Historial: el video con su media_id y luego el texto.
+    # Historial: el video con su media_id y luego el texto, ligados a la guía.
     assert [(m["media_type"], m["media_id"]) for m in backend.outgoing] == [("video", "media-asad"), ("text", None)]
+    assert {m["guide_number"] for m in backend.outgoing} == {"240063856178"}
     assert backend.notified == ["240063856178"]
 
 
@@ -436,6 +451,30 @@ def test_failed_reminder_does_not_mark_guide_as_notified(count, template):
     assert backend.outgoing == []
 
 
+def test_customer_phone_gets_prefix_of_business_country():
+    # Cuenta de Dropi de Guatemala: teléfonos de 8 dígitos.
+    source = FakeDropiSource([office_order("1784924", "FD45203393", phone="51319585")],
+                             details={"1784924": order_detail("1784924", "FD45203393")})
+    backend = FakeBackend(country=PhoneCountry("502", 8))
+    service, backend, sender = build_service(source, backend)
+
+    service.notify_office_orders(2, FROM, UNTIL)
+
+    assert {to for to, _, _ in sender.sent} == {"50251319585"}
+    assert backend.registered[0]["user_phone"] == "50251319585"
+
+
+def test_unknown_business_country_sends_nothing():
+    source = FakeDropiSource([office_order("1", "G1")], details={"1": order_detail("1", "G1")})
+    service, backend, sender = build_service(source, FakeBackend(country=None))
+
+    report = service.notify_office_orders(BUSINESS_ID, FROM, UNTIL)
+
+    assert sender.sent == []
+    assert source.order_list_calls == []  # ni siquiera consulta a Dropi
+    assert report.errors
+
+
 # ------------------------------ Datos de la plantilla ------------------------------
 
 
@@ -529,13 +568,15 @@ def test_product_names_are_single_line_for_meta():
 # ------------------------------ Business ------------------------------
 
 
-def test_run_uses_requested_business_for_guides_history_and_videos():
+def test_run_uses_requested_business_for_dropi_account_guides_history_and_videos():
     source = FakeDropiSource([office_order("1", "G1")], details={"1": order_detail("1", "G1")})
     videos = FakeVideos()
     service, backend, _ = build_service(source, videos=videos)
 
     service.notify_office_orders(7, FROM, UNTIL)
 
+    assert source.business_ids == {7}  # N8N elige la credencial de Dropi por business_id
+    assert source.order_calls == ["1"]
     assert backend.registered[0]["business_id"] == 7
     assert {m["business_id"] for m in backend.outgoing} == {7}
     assert videos.calls[0][0] == 7
@@ -712,12 +753,14 @@ class FakeBusinessBackend:
         return self.exists
 
 
-def endpoint_client(exists=True):
+def endpoint_client(exists=True, notifier=None, runs=None):
     app = FastAPI()
     app.include_router(notify_dropi_router)
-    notifier = FakeNotifier()
+    notifier = notifier or FakeNotifier()
+    runs = runs or RunGuard()
     app.dependency_overrides[get_dropi_notifier] = lambda: notifier
     app.dependency_overrides[get_backend_client] = lambda: FakeBusinessBackend(exists)
+    app.dependency_overrides[get_dropi_runs] = lambda: runs
     return TestClient(app), notifier
 
 
@@ -741,10 +784,63 @@ def test_endpoint_requires_valid_business_id(query):
 
 @pytest.mark.parametrize("exists,status", [(False, 404), (None, 503)])
 def test_endpoint_rejects_unknown_business_or_unreachable_backend(exists, status):
-    client, notifier = endpoint_client(exists=exists)
+    runs = RunGuard()
+    client, notifier = endpoint_client(exists=exists, runs=runs)
 
     assert client.post("/notify-dropi-mcp?business_id=99").status_code == status
     assert notifier.runs == []
+    assert runs.try_start(99)  # no quedó marcado como en curso
+
+
+class BlockingNotifier:
+    """La corrida del business 3 no termina hasta que se libere `finish`."""
+
+    def __init__(self):
+        self.runs = []
+        self.started = threading.Event()
+        self.finish = threading.Event()
+
+    def notify_office_orders(self, *args):
+        self.runs.append(args)
+        if args[0] == 3:
+            self.started.set()
+            assert self.finish.wait(5)
+
+
+def test_endpoint_rejects_second_run_of_same_business_until_first_ends():
+    notifier = BlockingNotifier()
+    client, _ = endpoint_client(notifier=notifier)
+
+    with ThreadPoolExecutor(1) as pool:
+        first = pool.submit(client.post, "/notify-dropi-mcp?business_id=3")
+        assert notifier.started.wait(5)
+
+        second = client.post("/notify-dropi-mcp?business_id=3")
+        other_business = client.post("/notify-dropi-mcp?business_id=4")
+
+        notifier.finish.set()
+        assert first.result(5).status_code == 202
+
+    assert second.status_code == 409
+    assert other_business.status_code == 202  # otro business corre en paralelo
+    assert [run[0] for run in notifier.runs] == [3, 4]
+
+    # Terminada la primera, el business 3 se puede volver a correr.
+    assert client.post("/notify-dropi-mcp?business_id=3").status_code == 202
+
+
+def test_failed_run_releases_business():
+    class FailingNotifier:
+        def notify_office_orders(self, *args):
+            raise RuntimeError("N8N caído")
+
+    runs = RunGuard()
+    client, _ = endpoint_client(notifier=FailingNotifier(), runs=runs)
+
+    with pytest.raises(RuntimeError):
+        client.post("/notify-dropi-mcp?business_id=3")
+
+    assert runs.try_start(3)
 
 
 # ------------------------------ Cliente N8N ------------------------------
@@ -775,16 +871,17 @@ class FakeHttpSession:
         return self.responses.pop(0)
 
 
-def test_client_sends_api_key_and_filters_with_status():
+def test_client_sends_api_key_business_and_filters_with_status():
     session = FakeHttpSession([FakeResponse(200, {"items": [{"order_id": "1"}], "count": 1})])
     client = N8nDropiClient("https://n8n.test/webhook/dropi/", api_key="secreto", session=session)
 
-    items, count = client.fetch_orders("RECLAME EN OFICINA", date(2026, 10, 10), date(2026, 10, 20), 1, 0)
+    items, count = client.fetch_orders(2, "RECLAME EN OFICINA", date(2026, 10, 10), date(2026, 10, 20), 1, 0)
 
     assert (items, count) == ([{"order_id": "1"}], 1)
     assert session.headers["api-key"] == "secreto"
     url, kwargs = session.calls[0]
     assert url == "https://n8n.test/webhook/dropi/ordenes"
+    assert kwargs["params"] == {"business_id": 2}
     assert kwargs["json"] == {"from": "2026-10-10", "until": "2026-10-20", "result_number": 1, "start": 0,
                               "status": "RECLAME EN OFICINA"}
 
@@ -794,18 +891,31 @@ def test_client_retries_rate_limit_with_backoff():
     session = FakeHttpSession([FakeResponse(429), FakeResponse(200, {"order_id": "93632719"})])
     client = N8nDropiClient("https://n8n.test/webhook/dropi", api_key="k", session=session, sleep=sleeps.append)
 
-    order = client.fetch_order("93632719")
+    order = client.fetch_order(1, "93632719")
 
     assert order == {"order_id": "93632719"}
-    assert session.calls[0] == ("https://n8n.test/webhook/dropi/orden", {"params": {"order_id": "93632719"}})
+    assert session.calls[0] == ("https://n8n.test/webhook/dropi/orden",
+                                {"params": {"order_id": "93632719", "business_id": 1}})
     assert sleeps == [2.0]
+
+
+@pytest.mark.parametrize("response", [
+    # Respuestas reales de N8N con el business_id equivocado.
+    FakeResponse(200, {"la orden 1784924 no está en tu cuenta": "confirma el número con el usuario"}),
+    FakeResponse(500, {"message": "Workflow execution failed"}),
+])
+def test_client_rejects_order_from_another_account(response):
+    session = FakeHttpSession([response] * 3)
+    client = N8nDropiClient("https://n8n.test/webhook/dropi", api_key="k", session=session, sleep=lambda s: None)
+
+    assert client.fetch_order(1, "1784924") is None
 
 
 def test_client_does_not_retry_rejected_api_key():
     session = FakeHttpSession([FakeResponse(403)])
     client = N8nDropiClient("https://n8n.test/webhook/dropi", api_key="mala", session=session, sleep=lambda s: None)
 
-    assert client.fetch_order("1") is None
+    assert client.fetch_order(1, "1") is None
     assert len(session.calls) == 1
 
 
@@ -813,10 +923,10 @@ def test_client_gives_up_after_max_attempts():
     session = FakeHttpSession([FakeResponse(429), FakeResponse(429), FakeResponse(429)])
     client = N8nDropiClient("https://n8n.test/webhook/dropi", api_key="k", session=session, sleep=lambda s: None)
 
-    assert client.fetch_order("1") is None
+    assert client.fetch_order(1, "1") is None
     assert len(session.calls) == 3
 
     session = FakeHttpSession([FakeResponse(503)] * 3)
     client = N8nDropiClient("https://n8n.test/webhook/dropi", api_key="k", session=session, sleep=lambda s: None)
     with pytest.raises(Exception):
-        client.fetch_orders(OFFICE_STATUS, FROM, UNTIL, 100, 0)
+        client.fetch_orders(1, OFFICE_STATUS, FROM, UNTIL, 100, 0)

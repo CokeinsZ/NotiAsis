@@ -73,7 +73,20 @@ El bot consume la API del backend (`BACKEND_API_URL`):
   guarda en el historial su **texto completo renderizado** (el que Meta
   muestra al cliente) — si una plantilla cambia en Meta Business,
   actualiza su `log_message()` en `app/whatsapp/templates/`.
-- **Mensaje de un usuario final**: `POST /messages/incoming`.
+- **Mensaje de un usuario final**: `POST /messages/incoming`. Todos los
+  business envían desde el mismo número de WhatsApp, así que el backend
+  decide a qué chat va el mensaje (un cliente puede comprarle a varios):
+  1. Si el cliente citó un mensaje al responder (o tocó un botón de una
+     plantilla), Meta manda `context.id` y el bot lo envía como
+     `reply_to_meta_message_id`: el mensaje va al business de la
+     notificación citada y queda ligado a su guía (`guide_number`, que el
+     panel muestra como "Responde a la guía X").
+  2. Si no, va al chat del cliente con actividad más reciente (último
+     mensaje enviado o recibido): a quien probablemente le está
+     respondiendo.
+- **Teléfonos sin indicativo** (Dropi, Google Sheet, PDF): se completan
+  con el país del business (`countries.phone_prefix` y `phone_length`,
+  que el bot lee de `GET /businesses/{id}`).
 - **Estados que reporta Meta** (sent/delivered/read):
   `PATCH /messages/{meta_message_id}/status`.
 
@@ -135,7 +148,11 @@ el backend (`GET /businesses/{id}/sheet` → `business_users_sheet`):
 
 `POST /notify-dropi-mcp?business_id=N` (responde 202 y procesa en
 segundo plano). `business_id` es obligatorio: es el business dueño de los
-chats e historial de la corrida (404 si no existe). El body es opcional:
+chats e historial de la corrida (404 si no existe) y elige la cuenta de
+Dropi que consulta N8N. Solo corre una notificación por business a la
+vez: mientras la anterior no termine, otra llamada para el mismo business
+responde 409 sin hacer nada (otros business sí corren en paralelo). El
+body es opcional:
 
 | Campo | Por defecto |
 |---|---|
@@ -152,13 +169,16 @@ curl -X POST "localhost:8000/notify-dropi-mcp?business_id=1" \
 
 `DROPI_N8N_URL` apunta a los webhooks de N8N (por defecto
 `https://n8n.notiasis.com/webhook/dropi`) y `N8N_API_KEY` es el header
-`api-key` que exigen (obligatorio: sin él responde 503). Las guías que ya
+`api-key` que exigen (obligatorio: sin él responde 503). N8N escoge la
+credencial de Dropi según el `business_id`: con uno equivocado `/orden`
+falla o responde que el pedido no está en la cuenta, y el pedido queda
+como error en el reporte. Las guías que ya
 pertenecen a otro business se omiten. El reporte de la corrida (nuevas,
 cuántas con video, envíos de cada plantilla, omitidas, errores,
 consultas a `/orden`) se imprime en los logs del bot al terminar.
 
-1. Pagina `GET {DROPI_N8N_URL}/ordenes` (body JSON con los filtros y
-   `"status": "RECLAME EN OFICINA"`): mientras `count == result_number`
+1. Pagina `GET {DROPI_N8N_URL}/ordenes?business_id=N` (body JSON con los
+   filtros y `"status": "RECLAME EN OFICINA"`): mientras `count == result_number`
    pide la siguiente página con `start += count`.
 2. Consulta en lote al backend (`POST /guides/lookup`) qué guías
    (`tracking_code`) ya existen, cuántas veces se notificaron y sus datos
@@ -184,7 +204,7 @@ consultas a `/orden`) se imprime en los logs del bot al terminar.
    es `SIN RECAUDO`).
 
 El MCP de Dropi tiene rate limit, así que el detalle del pedido
-(`GET {DROPI_N8N_URL}/orden?order_id=`) solo se consulta cuando la guía
+(`GET {DROPI_N8N_URL}/orden?order_id=&business_id=N`) solo se consulta cuando la guía
 no tiene guardados sus datos: la primera notificación (o una guía vieja
 registrada por otro flujo). Esos datos (cliente y productos) se guardan
 con la guía (`POST /guides` con `details`) y los días siguientes se leen
@@ -296,7 +316,10 @@ Todo el backend requiere `Authorization: Bearer <token>`, excepto `/auth/*`:
 | POST | `/auth/api-key` | Bot (api_key de la tabla `api_keys`) → JWT de **24h**, acceso global |
 | PATCH | `/associates/{id}/password` | Cambio de contraseña: pide la actual; solo el dueño de la cuenta (match con `phone_number` del JWT) |
 
-- Los asociados solo acceden a los recursos de **su** business (403 si no).
+- Los asociados solo acceden a los recursos de **su** business (403 si no):
+  el detalle del business, sus chats, estadísticas y multimedia. Todo lo
+  demás (crear business y asociados, clientes, guías, registrar mensajes)
+  es **solo del bot** (token de api_key).
 - Cada mensaje libre enviado renueva el token del asociado otros 15 min
   (la respuesta incluye `renewed_token`).
 - El bot lee `BACKEND_API_KEY` del entorno, obtiene su JWT solo, y lo
@@ -307,8 +330,21 @@ cd webapp/backend
 cp .env.example .env   # configurar DATABASE_URL y credenciales de Meta
 psql $DATABASE_URL -f db.sql
 cargo run
-cargo test             # 42 tests, no requieren base de datos
+cargo test             # no requieren base de datos
 ```
+
+`db.sql` es idempotente: sobre una base existente agrega lo que falte.
+Antes de correrlo en una base vieja:
+
+1. Revisar que no haya guías sin business (`SET NOT NULL` fallaría a
+   mitad del script): `SELECT number, user_id FROM guides WHERE business_id IS NULL;`.
+   Asignarles su business o borrarlas, y volver a correr el script.
+2. Revisar que ningún teléfono de asociado esté repetido (el índice
+   único fallaría): `SELECT phone_number FROM business_associates GROUP BY 1 HAVING count(*) > 1;`.
+3. Los business existentes quedan en Colombia. Los de otro país se
+   cambian a mano: `UPDATE businesses SET country_id = (SELECT id FROM countries WHERE code = 'GT') WHERE id = 2;`.
+   Un país nuevo es una fila más en `countries` (`code`, `name`,
+   `phone_prefix`, `phone_length`).
 
 O todo junto con Docker (la DB puede ser externa, ej. Neon):
 
@@ -379,30 +415,31 @@ Para la webapp:
 
 | Método | Ruta | Descripción |
 |---|---|---|
-| POST | `/businesses` | Crear empresa |
-| GET | `/businesses` · `/businesses/{id}` | Listar / detalle |
-| POST | `/businesses/{id}/associates` | Crear asociado (password con bcrypt) |
-| GET | `/businesses/{id}/associates` | Listar asociados |
-| GET | `/users` · `/users/{phone}` | Clientes finales |
+| GET | `/businesses/{id}` | Detalle con su país (`country`: `code`, `phone_prefix`, `phone_length`) |
+| GET | `/businesses/{id}/stats/notifications` | Estadísticas del dashboard |
 | GET | `/chats?business_id={id}` | Bandeja ordenada (importantes > respuesta reciente > guía notificada) + `window_open` |
 | PATCH | `/chats/{bid}/{user_phone}/importance` | Marcar/desmarcar chat como importante |
 | GET | `/chats/{business_id}/{user_phone}/messages` | Historial del chat |
 | POST | `/chats/{business_id}/{user_phone}/messages` | Enviar mensaje libre (422 si la ventana de 24h está cerrada) |
-| GET | `/messages/media/{media_id}` | Multimedia de Meta en memoria (túnel, sin tocar disco) con `Content-Disposition: inline` para visualizar en el navegador |
-| GET | `/guides?user_phone=` | Guías registradas |
-| GET | `/guides/{number}` | Una guía puntual (404 si no existe) |
-| GET | `/businesses/{id}/sheet` | Config del Google Sheet del business |
+| GET | `/messages/media/{media_id}` | Multimedia de Meta en memoria (túnel, sin tocar disco) con `Content-Disposition: inline` para visualizar en el navegador. Un asociado solo descarga la de mensajes de su business (404 si no) |
 
-Para el bot (Python):
+Solo para el bot (token de api_key; un asociado recibe 403) y la administración:
 
 | Método | Ruta | Descripción |
 |---|---|---|
+| POST | `/businesses` | Crear empresa: `{"name", "country_id"}` (`SELECT id, code FROM countries`) |
+| GET | `/businesses` | Listar empresas |
+| POST | `/businesses/{id}/associates` | Crear asociado (password con bcrypt). El teléfono puede ir sin indicativo: se completa con el país del business (400 si no es de ese país). 409 si el teléfono o el usuario ya existen |
+| GET | `/businesses/{id}/associates` · `/associates` | Listar asociados |
+| GET | `/businesses/{id}/sheet` | Config del Google Sheet del business |
+| GET | `/users` · `/users/{phone}` | Clientes finales |
+| GET | `/guides?user_phone=` · `/guides/{number}` | Guías registradas / una guía (404 si no existe) |
 | GET | `/associates/phones` | Números autorizados (reemplaza `ALLOWED_SENDER_NUMBERS`) |
-| POST | `/messages/incoming` | Registrar mensaje entrante del webhook |
-| POST | `/messages/outgoing` | Registrar plantilla enviada |
+| POST | `/messages/incoming` | Registrar mensaje entrante del webhook. `reply_to_meta_message_id` opcional: el mensaje que el cliente citó |
+| POST | `/messages/outgoing` | Registrar plantilla enviada, con la guía que notifica (`guide_number`) |
 | PATCH | `/messages/{meta_message_id}/status` | Actualizar estado (`sent`/`delivered`/`read`) |
 | POST | `/guides` | Registrar guía; responde `created: false` si es duplicada (no re-notificar). `details` opcional (cliente y productos del pedido) se guarda aunque la guía ya existiera |
-| POST | `/guides/lookup` | `{"numbers": [...]}` (máx. 500) → guías existentes con `notification_count`, `details` y `products`. Solo token del bot |
+| POST | `/guides/lookup` | `{"numbers": [...]}` (máx. 500) → guías existentes con `notification_count`, `details` y `products` |
 | POST | `/guides/{number}/notified` | Marcar cuándo se notificó la guía |
 
 La sesión usa JWT en `localStorage` (15 min, renovado automáticamente al

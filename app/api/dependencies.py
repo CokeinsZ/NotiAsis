@@ -18,6 +18,7 @@ from app.services.google_sheets import GoogleSheetClient
 from app.services.pdf_extractor import PdfTextExtractor
 from app.services.product_videos import ProductVideoLibrary
 from app.services.recipient_extractor import DeepSeekRecipientExtractor
+from app.services.run_guard import RunGuard
 from app.services.sheet_notifier import SheetNotificationService
 from app.services.shipping_notifier import ShippingNotificationService
 from app.services.webhook_processor import WhatsAppWebhookProcessor
@@ -91,6 +92,12 @@ def get_dropi_notifier() -> DropiNotificationService:
         debug_notification_number=settings.debug_notification_number,
         notification_override_number=settings.notification_override_number,
     )
+
+
+@lru_cache
+def get_dropi_runs() -> RunGuard:
+    """Corridas de /notify-dropi-mcp en curso, por business."""
+    return RunGuard()
 
 
 @lru_cache

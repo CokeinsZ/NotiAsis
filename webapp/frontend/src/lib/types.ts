@@ -49,4 +49,6 @@ export interface Message {
   status: MessageStatus | null;
   from_user: boolean;
   created_at: string;
+  /** Guía que notifica (saliente) o de la notificación que el cliente citó (entrante). */
+  guide_number: string | null;
 }

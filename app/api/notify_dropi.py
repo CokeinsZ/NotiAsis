@@ -3,9 +3,10 @@ from datetime import date, timedelta
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from app.api.dependencies import get_backend_client, get_dropi_notifier
+from app.api.dependencies import get_backend_client, get_dropi_notifier, get_dropi_runs
 from app.core.interfaces import NotificationBackend
 from app.services.dropi_notifier import DropiNotificationService
+from app.services.run_guard import RunGuard
 
 router = APIRouter()
 
@@ -40,6 +41,7 @@ def notify_dropi_mcp(
     body: NotifyDropiRequest | None = None,
     notifier: DropiNotificationService = Depends(get_dropi_notifier),
     backend: NotificationBackend = Depends(get_backend_client),
+    runs: RunGuard = Depends(get_dropi_runs),
 ) -> dict:
     """Notifica los pedidos de Dropi que están en "reclame en oficina".
 
@@ -47,6 +49,10 @@ def notify_dropi_mcp(
     detalle de los nuevos y enviar plantillas puede tardar varios minutos).
     El business se verifica antes: con uno inexistente no se registraría
     nada y cada corrida volvería a enviar la notificación inicial.
+
+    Una sola corrida por business a la vez (409 mientras la anterior no
+    termina): dos corridas simultáneas verían las mismas guías sin
+    notificar y les enviarían la plantilla dos veces.
     """
     exists = backend.business_exists(business_id)
     if exists is None:
@@ -54,9 +60,17 @@ def notify_dropi_mcp(
     if not exists:
         raise HTTPException(status_code=404, detail=f"El business {business_id} no existe")
 
+    if not runs.try_start(business_id):
+        raise HTTPException(
+            status_code=409,
+            detail=f"Ya hay una notificación de Dropi en curso para el business {business_id}",
+        )
+
     filters = body or NotifyDropiRequest()
     background_tasks.add_task(
-        notifier.notify_office_orders,
+        _run,
+        notifier,
+        runs,
         business_id,
         filters.from_date,
         filters.until,
@@ -71,3 +85,11 @@ def notify_dropi_mcp(
         "result_number": filters.result_number,
         "start": filters.start,
     }
+
+
+def _run(notifier: DropiNotificationService, runs: RunGuard, business_id: int, *filters) -> None:
+    """Libera el business al terminar, aunque la corrida falle."""
+    try:
+        notifier.notify_office_orders(business_id, *filters)
+    finally:
+        runs.finish(business_id)

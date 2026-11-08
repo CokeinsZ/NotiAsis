@@ -1,14 +1,20 @@
 use async_trait::async_trait;
 
 use crate::businesses::dtos::{
-    Business, BusinessAssociate, BusinessUsersSheet, CreateAssociateDto, CreateBusinessDto,
+    Business, BusinessAssociate, BusinessUsersSheet, Country, CreateAssociateDto, CreateBusinessDto,
 };
+
+/// Errores de negocio al registrar un asociado (el controlador los
+/// traduce a 409).
+pub const USERNAME_TAKEN: &str = "Username already exists";
+pub const PHONE_TAKEN: &str = "Phone number already registered to an associate";
 
 #[async_trait]
 pub trait BusinessRepositoryTrait: Send + Sync {
     async fn save_business(&self, dto: &CreateBusinessDto) -> Result<Business, String>;
     async fn get_businesses(&self) -> Result<Vec<Business>, String>;
     async fn get_business_by_id(&self, id: i32) -> Result<Option<Business>, String>;
+    async fn get_country_by_id(&self, id: i32) -> Result<Option<Country>, String>;
     async fn get_sheet_by_business(&self, business_id: i32) -> Result<Option<BusinessUsersSheet>, String>;
     async fn save_associate(&self, business_id: i32, dto: &CreateAssociateDto, password_hash: &str) -> Result<BusinessAssociate, String>;
     async fn get_associates_by_business(&self, business_id: i32) -> Result<Vec<BusinessAssociate>, String>;
@@ -16,6 +22,7 @@ pub trait BusinessRepositoryTrait: Send + Sync {
     async fn get_all_associates(&self) -> Result<Vec<BusinessAssociate>, String>;
     async fn get_all_associate_phones(&self) -> Result<Vec<String>, String>;
     async fn username_exists(&self, username: &str) -> Result<bool, String>;
+    async fn associate_phone_exists(&self, phone_number: &str) -> Result<bool, String>;
 }
 
 pub struct PostgresBusinessRepository {
@@ -32,12 +39,13 @@ impl PostgresBusinessRepository {
 impl BusinessRepositoryTrait for PostgresBusinessRepository {
     async fn save_business(&self, dto: &CreateBusinessDto) -> Result<Business, String> {
         let query = r#"
-            INSERT INTO businesses (name) VALUES ($1)
-            RETURNING id, name, state, created_at, updated_at
+            INSERT INTO businesses (name, country_id) VALUES ($1, $2)
+            RETURNING id, name, state, country_id, created_at, updated_at
         "#;
 
         let row: Business = sqlx::query_as(query)
             .bind(&dto.name)
+            .bind(dto.country_id)
             .fetch_one(&self.db_pool)
             .await
             .map_err(|e| e.to_string())?;
@@ -47,7 +55,7 @@ impl BusinessRepositoryTrait for PostgresBusinessRepository {
 
     async fn get_businesses(&self) -> Result<Vec<Business>, String> {
         let query = r#"
-            SELECT id, name, state, created_at, updated_at
+            SELECT id, name, state, country_id, created_at, updated_at
             FROM businesses WHERE state != 'Deleted'
             ORDER BY created_at DESC
         "#;
@@ -60,11 +68,24 @@ impl BusinessRepositoryTrait for PostgresBusinessRepository {
 
     async fn get_business_by_id(&self, id: i32) -> Result<Option<Business>, String> {
         let query = r#"
-            SELECT id, name, state, created_at, updated_at
+            SELECT id, name, state, country_id, created_at, updated_at
             FROM businesses WHERE id = $1 AND state != 'Deleted'
         "#;
 
         sqlx::query_as::<_, Business>(query)
+            .bind(id)
+            .fetch_optional(&self.db_pool)
+            .await
+            .map_err(|e| e.to_string())
+    }
+
+    async fn get_country_by_id(&self, id: i32) -> Result<Option<Country>, String> {
+        let query = r#"
+            SELECT id, code, name, phone_prefix, phone_length
+            FROM countries WHERE id = $1
+        "#;
+
+        sqlx::query_as::<_, Country>(query)
             .bind(id)
             .fetch_optional(&self.db_pool)
             .await
@@ -98,7 +119,16 @@ impl BusinessRepositoryTrait for PostgresBusinessRepository {
             .bind(password_hash)
             .fetch_one(&self.db_pool)
             .await
-            .map_err(|e| e.to_string())?;
+            .map_err(|e| {
+                // Dos registros simultáneos pasan la validación previa del
+                // servicio; los índices únicos deciden.
+                let constraint = e.as_database_error().and_then(|db| db.constraint());
+                match constraint {
+                    Some("business_associates_phone_number_key") => PHONE_TAKEN.to_string(),
+                    Some("business_associates_username_key") => USERNAME_TAKEN.to_string(),
+                    _ => e.to_string(),
+                }
+            })?;
 
         Ok(row)
     }
@@ -155,6 +185,20 @@ impl BusinessRepositoryTrait for PostgresBusinessRepository {
 
         let result: (bool,) = sqlx::query_as(query)
             .bind(username)
+            .fetch_one(&self.db_pool)
+            .await
+            .map_err(|e| e.to_string())?;
+
+        Ok(result.0)
+    }
+
+    async fn associate_phone_exists(&self, phone_number: &str) -> Result<bool, String> {
+        let query = r#"
+            SELECT EXISTS(SELECT 1 FROM business_associates WHERE phone_number = $1)
+        "#;
+
+        let result: (bool,) = sqlx::query_as(query)
+            .bind(phone_number)
             .fetch_one(&self.db_pool)
             .await
             .map_err(|e| e.to_string())?;

@@ -8,16 +8,20 @@ use axum::{
 };
 use validator::Validate;
 
-use crate::auth::middleware::AuthenticatedClaims;
+use crate::auth::middleware::{AuthenticatedClaims, require_bot};
 use crate::messages::dtos::{IncomingMessageDto, OutgoingMessageDto, UpdateMessageStatusDto};
 use crate::state::MessageState;
 use crate::tools::responses::{build_validation_response, json_response};
 
 /// El bot de Python reporta aquí los mensajes entrantes del webhook de Meta.
 async fn register_incoming(
+    claims: AuthenticatedClaims,
     State(state): State<MessageState>,
     Json(body): Json<IncomingMessageDto>,
 ) -> (StatusCode, Json<serde_json::Value>) {
+    if let Err(response) = require_bot(&claims.0) {
+        return response;
+    }
     if let Err(errors) = body.validate() {
         return build_validation_response(errors);
     }
@@ -40,9 +44,13 @@ async fn register_incoming(
 /// El bot de Python reporta aquí los mensajes salientes (plantillas) para
 /// que queden en el historial del chat.
 async fn register_outgoing(
+    claims: AuthenticatedClaims,
     State(state): State<MessageState>,
     Json(body): Json<OutgoingMessageDto>,
 ) -> (StatusCode, Json<serde_json::Value>) {
+    if let Err(response) = require_bot(&claims.0) {
+        return response;
+    }
     if let Err(errors) = body.validate() {
         return build_validation_response(errors);
     }
@@ -65,10 +73,14 @@ async fn register_outgoing(
 /// Meta reporta los cambios de estado (sent/delivered/read) de los
 /// mensajes enviados; el bot los reenvía aquí.
 async fn update_status(
+    claims: AuthenticatedClaims,
     State(state): State<MessageState>,
     Path(meta_message_id): Path<String>,
     Json(body): Json<UpdateMessageStatusDto>,
 ) -> (StatusCode, Json<serde_json::Value>) {
+    if let Err(response) = require_bot(&claims.0) {
+        return response;
+    }
     if let Err(errors) = body.validate() {
         return build_validation_response(errors);
     }
@@ -90,11 +102,31 @@ async fn update_status(
 /// Descarga multimedia de Meta y la reenvía al navegador en memoria
 /// (Content-Disposition: inline para que se visualice/reproduzca en la
 /// página en vez de descargarse). Nada se guarda en el servidor.
+/// Un asociado solo descarga la multimedia de los mensajes de su business.
 async fn get_media(
-    _claims: AuthenticatedClaims,
+    claims: AuthenticatedClaims,
     State(state): State<MessageState>,
     Path(media_id): Path<String>,
 ) -> Response<Body> {
+    if claims.0.is_associate() {
+        let allowed = match claims.0.business_id {
+            Some(business_id) => state.message_service.media_belongs_to_business(&media_id, business_id).await,
+            None => Ok(false),
+        };
+        match allowed {
+            Ok(true) => {}
+            // 404 y no 403: no revela si el media_id existe en otro business.
+            Ok(false) => {
+                return json_response(StatusCode::NOT_FOUND, serde_json::json!({ "message": "Media not found" }))
+                    .into_response();
+            }
+            Err(e) => {
+                return json_response(StatusCode::INTERNAL_SERVER_ERROR, serde_json::json!({ "message": e }))
+                    .into_response();
+            }
+        }
+    }
+
     match state.message_service.fetch_media(&media_id).await {
         Ok((content_type, bytes)) => Response::builder()
             .status(StatusCode::OK)
@@ -163,6 +195,14 @@ mod tests {
                     iat: 0,
                     exp: usize::MAX,
                 }),
+                "bot" => Ok(Claims {
+                    sub: "bot".into(),
+                    kind: "api_key".into(),
+                    business_id: None,
+                    phone_number: None,
+                    iat: 0,
+                    exp: usize::MAX,
+                }),
                 _ => Err("invalid token".into()),
             }
         }
@@ -210,6 +250,7 @@ mod tests {
                 status: None,
                 from_user: true,
                 created_at: chrono::Utc::now().naive_utc(),
+                guide_number: None,
             })
         }
 
@@ -225,6 +266,7 @@ mod tests {
                 status: Some(MessageStatus::Sent),
                 from_user: false,
                 created_at: chrono::Utc::now().naive_utc(),
+                guide_number: dto.guide_number,
             })
         }
 
@@ -233,11 +275,16 @@ mod tests {
         }
 
         async fn fetch_media(&self, media_id: &str) -> Result<(String, Vec<u8>), String> {
-            if media_id == "existe" {
+            if media_id == "existe" || media_id == "de-otro-business" {
                 Ok(("application/pdf".to_string(), b"%PDF-fake".to_vec()))
             } else {
                 Err("media not found".to_string())
             }
+        }
+
+        async fn media_belongs_to_business(&self, media_id: &str, business_id: i32) -> Result<bool, String> {
+            let owner = if media_id == "de-otro-business" { 2 } else { 1 };
+            Ok(business_id == owner)
         }
     }
 
@@ -269,7 +316,7 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .uri("/incoming")
-                    .header("Authorization", "Bearer valido")
+                    .header("Authorization", "Bearer bot")
                     .method("POST")
                     .header("Content-Type", "application/json")
                     .body(Body::from(serde_json::to_string(&payload).unwrap()))
@@ -298,7 +345,7 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .uri("/incoming")
-                    .header("Authorization", "Bearer valido")
+                    .header("Authorization", "Bearer bot")
                     .method("POST")
                     .header("Content-Type", "application/json")
                     .body(Body::from(serde_json::to_string(&payload).unwrap()))
@@ -318,7 +365,7 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .uri("/wamid.abc/status")
-                    .header("Authorization", "Bearer valido")
+                    .header("Authorization", "Bearer bot")
                     .method("PATCH")
                     .header("Content-Type", "application/json")
                     .body(Body::from(serde_json::to_string(&payload).unwrap()))
@@ -367,6 +414,44 @@ mod tests {
             .unwrap();
 
         assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+    }
+
+    async fn call(method: &str, uri: &str, token: &str, body: serde_json::Value) -> StatusCode {
+        create_routes()
+            .oneshot(
+                Request::builder()
+                    .uri(uri)
+                    .method(method)
+                    .header("Authorization", format!("Bearer {token}"))
+                    .header("Content-Type", "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+            .status()
+    }
+
+    #[tokio::test]
+    async fn associates_cannot_register_messages_or_statuses() {
+        let incoming = serde_json::json!({
+            "user_phone": "573003579384", "business_id": 2, "meta_message_id": "wamid.x", "media_type": "text"
+        });
+        let outgoing = serde_json::json!({
+            "user_phone": "573003579384", "business_id": 2, "meta_message_id": "wamid.y", "media_type": "text"
+        });
+
+        assert_eq!(call("POST", "/incoming", "valido", incoming).await, StatusCode::FORBIDDEN);
+        assert_eq!(call("POST", "/outgoing", "valido", outgoing.clone()).await, StatusCode::FORBIDDEN);
+        assert_eq!(call("PATCH", "/wamid.y/status", "valido", serde_json::json!({"status": "read"})).await,
+                   StatusCode::FORBIDDEN);
+        assert_eq!(call("POST", "/outgoing", "bot", outgoing).await, StatusCode::CREATED);
+    }
+
+    #[tokio::test]
+    async fn associate_cannot_download_media_of_another_business() {
+        assert_eq!(call("GET", "/media/de-otro-business", "valido", serde_json::json!({})).await, StatusCode::NOT_FOUND);
+        assert_eq!(call("GET", "/media/de-otro-business", "bot", serde_json::json!({})).await, StatusCode::OK);
     }
 
     #[tokio::test]

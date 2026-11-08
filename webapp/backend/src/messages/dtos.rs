@@ -46,6 +46,9 @@ pub struct Message {
     pub status: Option<MessageStatus>,
     pub from_user: bool,
     pub created_at: NaiveDateTime,
+    /// Guía de la notificación (salientes) o de la notificación que el
+    /// cliente citó al responder (entrantes).
+    pub guide_number: Option<String>,
 }
 
 /// Mensaje libre que la webapp envía dentro de la ventana de 24h.
@@ -64,8 +67,14 @@ pub struct IncomingMessageDto {
     #[validate(length(max = 255))]
     pub user_name: Option<String>,
 
-    /// Si no viene, se usa el business del chat más reciente del usuario.
+    /// Si no viene, se deduce: el business del mensaje citado
+    /// (`reply_to_meta_message_id`) o el del chat con actividad más reciente.
     pub business_id: Option<i32>,
+
+    /// wamid del mensaje que el cliente citó al responder (`context.id`
+    /// en el webhook de Meta; también llega al tocar un botón de plantilla).
+    #[validate(length(min = 1, max = 255))]
+    pub reply_to_meta_message_id: Option<String>,
 
     #[validate(custom(function = "validate_non_blank"))]
     pub meta_message_id: String,
@@ -98,6 +107,10 @@ pub struct OutgoingMessageDto {
 
     pub message: Option<String>,
     pub media_id: Option<String>,
+
+    /// Guía que notifica la plantilla.
+    #[validate(length(min = 1, max = 20))]
+    pub guide_number: Option<String>,
 }
 
 /// Actualización de estado (sent/delivered/read) reportada por Meta.
@@ -123,6 +136,7 @@ mod tests {
             user_phone: "573003579384".into(),
             user_name: None,
             business_id: None,
+            reply_to_meta_message_id: None,
             meta_message_id: "wamid.123".into(),
             media_type: MediaType::Text,
             message: Some("Hola".into()),

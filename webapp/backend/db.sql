@@ -33,6 +33,21 @@ CREATE TABLE IF NOT EXISTS users (
 	full_name VARCHAR(255) NOT NULL
 );
 
+-- País de cada business: los teléfonos de sus clientes llegan sin
+-- indicativo (Dropi, Google Sheet, PDF) y se completan con estos datos.
+CREATE TABLE IF NOT EXISTS countries (
+	id SERIAL PRIMARY KEY,
+	code CHAR(2) UNIQUE NOT NULL,         -- ISO 3166-1 alfa-2
+	name VARCHAR(100) NOT NULL,
+	phone_prefix VARCHAR(4) NOT NULL,     -- indicativo sin '+', ej. 57
+	phone_length SMALLINT NOT NULL        -- dígitos del número sin indicativo, ej. 10
+);
+
+INSERT INTO countries (code, name, phone_prefix, phone_length) VALUES
+	('CO', 'Colombia', '57', 10),
+	('GT', 'Guatemala', '502', 8)
+ON CONFLICT (code) DO NOTHING;
+
 CREATE TABLE IF NOT EXISTS businesses (
 	id SERIAL PRIMARY KEY,
 	name VARCHAR(255) NOT NULL,
@@ -41,6 +56,15 @@ CREATE TABLE IF NOT EXISTS businesses (
 	created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
 	updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
+
+-- Los business que ya existían quedan en Colombia; uno de otro país se
+-- corrige a mano: UPDATE businesses SET country_id = (SELECT id FROM
+-- countries WHERE code = 'GT') WHERE id = 2;
+ALTER TABLE businesses ADD COLUMN IF NOT EXISTS country_id INT
+	REFERENCES countries(id) ON UPDATE CASCADE;
+UPDATE businesses SET country_id = (SELECT id FROM countries WHERE code = 'CO')
+	WHERE country_id IS NULL;
+ALTER TABLE businesses ALTER COLUMN country_id SET NOT NULL;
 
 CREATE TABLE IF NOT EXISTS business_associates (
 	id SERIAL PRIMARY KEY,
@@ -53,6 +77,11 @@ CREATE TABLE IF NOT EXISTS business_associates (
 		ON DELETE CASCADE
 		ON UPDATE CASCADE
 );
+
+-- Un número de WhatsApp identifica a un solo asociado (el bot decide por
+-- el número a qué business pertenece una guía enviada en PDF).
+CREATE UNIQUE INDEX IF NOT EXISTS business_associates_phone_number_key
+	ON business_associates (phone_number);
 
 CREATE TABLE IF NOT EXISTS business_users_sheet (
 	id SERIAL PRIMARY KEY,
@@ -105,6 +134,11 @@ CREATE TABLE IF NOT EXISTS messages (
 		ON UPDATE CASCADE
 );
 
+-- Guía a la que se refiere el mensaje: la de la notificación enviada, o
+-- en un mensaje del cliente, la de la notificación que citó al responder.
+-- Sin llave foránea a propósito: el historial nunca se pierde por ella.
+ALTER TABLE messages ADD COLUMN IF NOT EXISTS guide_number VARCHAR(20);
+
 CREATE TABLE IF NOT EXISTS guides (
 	number VARCHAR(20) PRIMARY KEY,
 	user_id VARCHAR(20) NOT NULL,
@@ -114,8 +148,24 @@ CREATE TABLE IF NOT EXISTS guides (
 
 	FOREIGN KEY (user_id) REFERENCES users(phone_number)
 		ON DELETE CASCADE
+		ON UPDATE CASCADE,
+	FOREIGN KEY (business_id) REFERENCES businesses(id)
+		ON DELETE CASCADE
 		ON UPDATE CASCADE
 );
+
+-- En bases creadas antes, business_id quedó opcional y sin llave foránea
+-- (CREATE TABLE IF NOT EXISTS no modifica una tabla que ya existe).
+-- SET NOT NULL falla si hay guías sin business; revisarlas antes con
+--   SELECT number, user_id FROM guides WHERE business_id IS NULL;
+ALTER TABLE guides ALTER COLUMN business_id SET NOT NULL;
+DO $$ BEGIN
+	IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'guides_business_id_fkey') THEN
+		ALTER TABLE guides ADD CONSTRAINT guides_business_id_fkey
+			FOREIGN KEY (business_id) REFERENCES businesses(id)
+			ON DELETE CASCADE ON UPDATE CASCADE;
+	END IF;
+END $$;
 
 -- Datos del pedido asociados a la guía (cliente y productos). Se guardan
 -- la primera vez que se notifica un pedido de Dropi para que los
@@ -184,6 +234,8 @@ CREATE TABLE IF NOT EXISTS guide_notifications (
 );
 
 CREATE INDEX IF NOT EXISTS idx_messages_chat_time ON messages (business_id, user_id, created_at DESC);
+-- Autorizar la descarga de multimedia: el media_id debe ser de un mensaje del business.
+CREATE INDEX IF NOT EXISTS idx_messages_media ON messages (media_id) WHERE media_id IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_chats_business_activity ON chats (business_id, last_user_message_timestamp DESC);
 CREATE INDEX IF NOT EXISTS idx_guide_notifications_business_date ON guide_notifications (business_id, (created_at::date));
 CREATE INDEX IF NOT EXISTS idx_guide_notifications_guide ON guide_notifications (guide_number);

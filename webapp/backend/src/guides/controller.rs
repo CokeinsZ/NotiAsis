@@ -16,9 +16,13 @@ use crate::tools::responses::{build_validation_response, json_response};
 /// Si trae `details` (datos del pedido), se guardan aunque la guía ya
 /// existiera.
 async fn register_guide(
+    claims: AuthenticatedClaims,
     State(state): State<GuideState>,
     Json(body): Json<RegisterGuideDto>,
 ) -> (StatusCode, Json<serde_json::Value>) {
+    if let Err(response) = require_bot(&claims.0) {
+        return response;
+    }
     if let Err(errors) = body.validate() {
         return build_validation_response(errors);
     }
@@ -43,9 +47,13 @@ async fn register_guide(
 }
 
 async fn get_guides(
+    claims: AuthenticatedClaims,
     State(state): State<GuideState>,
     Query(filters): Query<GuideFilters>,
 ) -> (StatusCode, Json<serde_json::Value>) {
+    if let Err(response) = require_bot(&claims.0) {
+        return response;
+    }
     if let Err(errors) = filters.validate() {
         return build_validation_response(errors);
     }
@@ -67,9 +75,13 @@ async fn get_guides(
 
 /// Consulta una guía puntual por su número.
 async fn get_guide(
+    claims: AuthenticatedClaims,
     State(state): State<GuideState>,
     Path(number): Path<String>,
 ) -> (StatusCode, Json<serde_json::Value>) {
+    if let Err(response) = require_bot(&claims.0) {
+        return response;
+    }
     match state.guide_service.get_guide(&number).await {
         Ok(guide) => json_response(
             StatusCode::OK,
@@ -117,9 +129,13 @@ async fn lookup_guides(
 
 /// El bot marca la guía como notificada tras enviar las plantillas.
 async fn mark_guide_notified(
+    claims: AuthenticatedClaims,
     State(state): State<GuideState>,
     Path(number): Path<String>,
 ) -> (StatusCode, Json<serde_json::Value>) {
+    if let Err(response) = require_bot(&claims.0) {
+        return response;
+    }
     match state.guide_service.mark_notified(&number).await {
         Ok(_) => json_response(
             StatusCode::OK,
@@ -141,4 +157,73 @@ pub fn guide_routes(state: GuideState) -> Router {
         .route("/{number}", get(get_guide))
         .route("/{number}/notified", post(mark_guide_notified))
         .with_state(state)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use async_trait::async_trait;
+    use serde_json::json;
+
+    use super::*;
+    use crate::auth::test_support::{status_of, with_auth};
+    use crate::guides::dtos::{DailyNotificationStat, Guide, GuideRegistration, GuideWithDetails};
+    use crate::guides::service::GuideServiceTrait;
+    use crate::state::AppState;
+
+    /// Los handlers deben responder 403 antes de llegar al servicio.
+    struct UnreachableGuideService;
+
+    #[async_trait]
+    impl GuideServiceTrait for UnreachableGuideService {
+        async fn register_guide(&self, _: RegisterGuideDto) -> Result<GuideRegistration, String> {
+            unreachable!()
+        }
+
+        async fn get_guides(&self, _: Option<String>) -> Result<Vec<Guide>, String> {
+            unreachable!()
+        }
+
+        async fn lookup_guides(&self, _: Vec<String>) -> Result<Vec<GuideWithDetails>, String> {
+            unreachable!()
+        }
+
+        async fn get_guide(&self, _: &str) -> Result<Guide, String> {
+            unreachable!()
+        }
+
+        async fn mark_notified(&self, _: &str) -> Result<(), String> {
+            unreachable!()
+        }
+
+        async fn get_notification_stats(
+            &self,
+            _: i32,
+            _: Option<i32>,
+            _: Option<chrono::NaiveDate>,
+            _: Option<chrono::NaiveDate>,
+        ) -> Result<Vec<DailyNotificationStat>, String> {
+            unreachable!()
+        }
+    }
+
+    #[tokio::test]
+    async fn associates_cannot_read_or_change_guides() {
+        let routes = with_auth(guide_routes(GuideState {
+            guide_service: Arc::new(UnreachableGuideService),
+            global_state: Arc::new(AppState {}),
+        }));
+        let guide = json!({ "number": "G1", "user_phone": "573001112233", "user_name": "X", "business_id": 9 });
+
+        for (method, uri, body) in [
+            ("POST", "/", guide),
+            ("GET", "/", json!({})),
+            ("GET", "/G1", json!({})),
+            ("POST", "/G1/notified", json!({})),
+            ("POST", "/lookup", json!({ "numbers": ["G1"] })),
+        ] {
+            assert_eq!(status_of(&routes, method, uri, "asociado-7", body).await, StatusCode::FORBIDDEN, "{method} {uri}");
+        }
+    }
 }
