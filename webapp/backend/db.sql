@@ -180,6 +180,13 @@ ALTER TABLE guides ADD COLUMN IF NOT EXISTS shipping_company VARCHAR(128);
 ALTER TABLE guides ADD COLUMN IF NOT EXISTS order_total NUMERIC(14, 2);
 ALTER TABLE guides ADD COLUMN IF NOT EXISTS currency VARCHAR(8);
 
+-- Seguimiento del envío de pedidos de Dropi (POST /notify-dropi-tracking
+-- del bot): nivel más alto ya notificado (0 ninguno, 1 pedido_enviado_1,
+-- 2 pedido_camino_1). Cada nivel se notifica una sola vez y el nivel
+-- nunca baja. El nivel 3 (reclame en oficina) usa notification_count.
+ALTER TABLE guides ADD COLUMN IF NOT EXISTS tracking_level SMALLINT NOT NULL DEFAULT 0;
+ALTER TABLE guides ADD COLUMN IF NOT EXISTS tracking_notified_at TIMESTAMP;
+
 CREATE TABLE IF NOT EXISTS guide_products (
 	id SERIAL PRIMARY KEY,
 	guide_number VARCHAR(20) NOT NULL,

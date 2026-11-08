@@ -279,7 +279,7 @@ def test_orders_page_failure_processes_orders_already_fetched():
 
     assert report.total_orders == 2
     assert report.new_notifications == 2
-    assert "ordenes start=2" in report.errors
+    assert "ordenes RECLAME EN OFICINA start=2" in report.errors
 
 
 # ------------------------------ Escalación ------------------------------

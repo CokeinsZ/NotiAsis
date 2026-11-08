@@ -1,12 +1,10 @@
-import math
-import re
-import unicodedata
 from dataclasses import dataclass, field
 from datetime import date
 
 from app.core.interfaces import DropiOrderSource, MessageSender, NotificationBackend, ProductVideoSource
-from app.core.phones import PhoneCountry, to_international
+from app.core.phones import PhoneCountry
 from app.models.shipping import RecipientInfo
+from app.services.dropi_orders import DropiOrderNotifier, DropiRunReport
 from app.services.notification_policy import NotificationStep, daily_step
 from app.whatsapp.templates.base import TemplateMessage
 from app.whatsapp.templates.mensaje_guia import MensajeGuiaTemplate
@@ -18,35 +16,11 @@ from app.whatsapp.templates.video_producto import VideoProductoTemplate
 # Estado de Dropi que se notifica (filtro de /ordenes).
 OFFICE_STATUS = "RECLAME EN OFICINA"
 
-# Pedido ya pagado: la transportadora no cobra nada al entregarlo.
-PREPAID_RATE_TYPE = "SIN RECAUDO"
-
-# Tope de páginas de /ordenes por corrida: protege contra un webhook que
-# ignore `start` y devuelva siempre una página llena.
-MAX_ORDER_PAGES = 100
-
-# Longitudes máximas que acepta el backend (POST /guides): un valor más
-# largo haría fallar el registro de la guía completa.
-FIELD_LIMITS = {
-    "order_id": 32,
-    "customer_name": 255,
-    "customer_document": 32,
-    "delivery_address": 1000,
-    "city": 128,
-    "shipping_company": 128,
-    "currency": 8,
-    "product_name": 512,
-}
-
 
 @dataclass
-class DropiNotificationReport:
-    """Resumen de una corrida de notificación de pedidos de Dropi."""
+class DropiNotificationReport(DropiRunReport):
+    """Resumen de una corrida de notificación de pedidos de Dropi en oficina."""
 
-    total_orders: int = 0
-    pages: int = 0
-    # Consultas a /orden: el MCP de Dropi tiene rate limit.
-    order_lookups: int = 0
     # Día 1 (video_producto + mensaje_guia).
     new_notifications: int = 0
     # Día 2 (recordatorio).
@@ -58,11 +32,9 @@ class DropiNotificationReport:
     videos: int = 0
     # Primeras notificaciones que salieron sin video.
     without_video: list[str] = field(default_factory=list)
-    skipped: list[str] = field(default_factory=list)
-    errors: list[str] = field(default_factory=list)
 
 
-class DropiNotificationService:
+class DropiNotificationService(DropiOrderNotifier):
     """Notificación diaria de los pedidos de Dropi en "reclame en oficina".
 
     1. Pagina /ordenes (estado OFFICE_STATUS) hasta traer todos los
@@ -90,12 +62,14 @@ class DropiNotificationService:
         debug_notification_number: str | None = None,
         notification_override_number: str | None = None,
     ) -> None:
-        self._order_source = order_source
-        self._backend = backend
-        self._message_sender = message_sender
+        super().__init__(
+            order_source=order_source,
+            backend=backend,
+            message_sender=message_sender,
+            debug_notification_number=debug_notification_number,
+            notification_override_number=notification_override_number,
+        )
         self._product_videos = product_videos
-        self._debug_notification_number = debug_notification_number
-        self._notification_override_number = notification_override_number
 
     def notify_office_orders(
         self,
@@ -115,7 +89,7 @@ class DropiNotificationService:
             print(f"Dropi notification aborted for business {business_id}: country unavailable")
             return report
 
-        orders = self._fetch_orders(business_id, from_date, until_date, result_number, start, report)
+        orders = self._fetch_orders(business_id, OFFICE_STATUS, from_date, until_date, result_number, start, report)
         orders = self._notifiable_orders(orders, report)
         report.total_orders = len(orders)
         print(f"Dropi {from_date}..{until_date}: {len(orders)} pedido(s) en oficina")
@@ -143,50 +117,6 @@ class DropiNotificationService:
         if report.errors:
             print(f"Dropi: errores: {', '.join(report.errors)}")
         return report
-
-    def _fetch_orders(
-        self,
-        business_id: int,
-        from_date: date,
-        until_date: date,
-        result_number: int,
-        start: int,
-        report: DropiNotificationReport,
-    ) -> list[dict]:
-        """Mientras una página llegue llena (count == result_number) quedan
-        más pedidos: se pide la siguiente con start += count."""
-        orders: list[dict] = []
-        seen: set[str] = set()
-        offset = start
-
-        for _ in range(MAX_ORDER_PAGES):
-            try:
-                items, count = self._order_source.fetch_orders(
-                    business_id, OFFICE_STATUS, from_date, until_date, result_number, offset
-                )
-            except Exception as e:
-                # Se procesan los pedidos ya obtenidos; el resto queda para
-                # la próxima corrida.
-                print(f"Error fetching Dropi orders (start={offset}): {e}")
-                report.errors.append(f"ordenes start={offset}")
-                return orders
-
-            report.pages += 1
-            new_items = [item for item in items if self._order_key(item) not in seen]
-            seen.update(self._order_key(item) for item in items)
-            orders.extend(new_items)
-
-            if count < result_number:
-                return orders
-            if not new_items:
-                print(f"WARNING: Dropi orders page start={offset} only repeated orders; stopping")
-                report.errors.append(f"ordenes start={offset}: página repetida")
-                return orders
-            offset += count
-
-        print(f"WARNING: reached {MAX_ORDER_PAGES} pages of Dropi orders; stopping")
-        report.errors.append(f"ordenes: tope de {MAX_ORDER_PAGES} páginas")
-        return orders
 
     def _notifiable_orders(self, orders: list[dict], report: DropiNotificationReport) -> list[dict]:
         """Descarta pedidos sin guía, repetidos (una notificación por guía)
@@ -259,7 +189,8 @@ class DropiNotificationService:
                 return
             details, detail_phone = result
 
-        recipient = self._build_recipient(order, details, self._phone(order, guide, detail_phone, country))
+        phone = self._phone(order, guide, detail_phone, country)
+        recipient = self._build_recipient(order, details, phone, self._full_address(order, details))
         amount = self._amount_to_pay(order, details)
         # El valor a pagar solo va en pedido_oficina.
         if not recipient.is_complete or (amount is None and step is NotificationStep.DAILY_REMINDER):
@@ -328,181 +259,4 @@ class DropiNotificationService:
             return [RecordatorioFinalTemplate(recipient)]
         return [PedidoOficinaTemplate(recipient, amount)]
 
-    def _fetch_details(
-        self, business_id: int, order: dict, report: DropiNotificationReport
-    ) -> tuple[dict, str] | None:
-        """Consulta /orden y arma los datos del pedido en el formato del
-        backend. Retorna (datos, teléfono del cliente) o None si falla."""
-        order_id = self._clean(order.get("order_id"), "order_id")
-        if not order_id:
-            print(f"Dropi guide {self._tracking(order)}: order without order_id")
-            return None
 
-        report.order_lookups += 1
-        detail = self._order_source.fetch_order(business_id, order_id)
-        if not detail:
-            return None
-
-        customer = detail.get("customer") or {}
-        products = []
-        for item in detail.get("items") or []:
-            name = self._clean(item.get("product_name"), "product_name")
-            if name:
-                products.append({
-                    "product_id": _as_int(item.get("product_id")),
-                    "product_name": name,
-                    "quantity": _as_int(item.get("qty")) or 1,
-                })
-
-        details = {
-            "order_id": order_id,
-            "customer_name": self._clean(customer.get("name") or order.get("customer_name"), "customer_name") or None,
-            "customer_document": self._clean(customer.get("document"), "customer_document") or None,
-            "delivery_address": self._clean(customer.get("address"), "delivery_address") or None,
-            "city": self._clean(customer.get("city") or order.get("city"), "city") or None,
-            "shipping_company": self._clean(order.get("shipping_company"), "shipping_company") or None,
-            "total": _as_float(detail.get("total", order.get("total"))),
-            "currency": self._clean(detail.get("currency") or order.get("currency"), "currency") or None,
-            "products": products,
-        }
-        return details, self._clean(customer.get("phone"))
-
-    @staticmethod
-    def _stored_details(guide: dict | None) -> dict:
-        """Datos del pedido guardados en el backend (mismo formato que
-        los que se le envían en register_guide)."""
-        if not guide:
-            return {}
-        return {**(guide.get("details") or {}), "products": guide.get("products") or []}
-
-    @staticmethod
-    def _has_order_data(details: dict) -> bool:
-        return bool(details.get("products") and (details.get("delivery_address") or details.get("city")))
-
-    def _build_recipient(self, order: dict, details: dict, phone: str) -> RecipientInfo:
-        products = [p["product_name"] for p in details.get("products") or [] if p.get("product_name")]
-        return RecipientInfo(
-            name=self._clean(details.get("customer_name") or order.get("customer_name")),
-            phone=phone,
-            tracking_number=self._tracking(order),
-            delivery_address=self._full_address(order, details),
-            product=", ".join(products),
-        )
-
-    def _full_address(self, order: dict, details: dict) -> str:
-        """Dirección, ciudad y transportadora, sin repetir lo que la
-        dirección ya menciona: "Oficina Interrapidisimo, TARAZA" o
-        "ENVIA - Cra 5 # 10-20, CALI"."""
-        address = self._clean(details.get("delivery_address"))
-        city = self._clean(details.get("city") or order.get("city"))
-        carrier = self._clean(details.get("shipping_company") or order.get("shipping_company"))
-        if city and _compact(city) not in _compact(address):
-            address = f"{address}, {city}" if address else city
-        if carrier and _compact(carrier) not in _compact(address):
-            address = f"{carrier} - {address}" if address else carrier
-        return address
-
-    def _amount_to_pay(self, order: dict, details: dict) -> str | None:
-        """Valor a cobrar en la oficina con separador de miles ("84.900").
-        El total de /ordenes es el más reciente; si no viene, el guardado."""
-        if self._clean(order.get("rate_type")).upper() == PREPAID_RATE_TYPE:
-            return "0"
-        total = _as_float(order.get("total"))
-        if total is None:
-            total = _as_float(details.get("total"))
-        if total is None:
-            return None
-        return f"{round(total):,}".replace(",", ".")
-
-    def _phone(self, order: dict, guide: dict | None, detail_phone: str, country: PhoneCountry) -> str:
-        """El teléfono con el que ya existe el chat tiene prioridad. Los de
-        Dropi llegan sin indicativo: se les pone el del país del business."""
-        phone = (guide or {}).get("user_id") or order.get("customer_phone") or detail_phone
-        return to_international(phone, country)
-
-    def _deliver(
-        self,
-        recipient: RecipientInfo,
-        templates: list[TemplateMessage],
-    ) -> list[tuple[TemplateMessage, str]]:
-        """Envía las plantillas en orden y retorna las enviadas con sus meta_ids.
-
-        Con NOTIFICATION_OVERRIDE_NUMBER configurado, el envío físico se
-        desvía a ese número (pruebas); el historial siempre se registra
-        con el teléfono real del destinatario. La copia de depuración
-        (DEBUG_NOTIFICATION_NUMBER) se envía además si está configurada.
-        """
-        target_number = self._notification_override_number or recipient.phone
-        if target_number != recipient.phone:
-            print(f"[OVERRIDE] {recipient.tracking_number}: envío desviado a {target_number}")
-
-        sent: list[tuple[TemplateMessage, str]] = []
-        for template in templates:
-            meta_message_id = self._message_sender.send_template(target_number, template)
-            if meta_message_id:
-                sent.append((template, meta_message_id))
-
-        debug_number = self._debug_notification_number
-        if debug_number and debug_number != target_number:
-            for template in templates:
-                self._message_sender.send_template(debug_number, template)
-
-        return sent
-
-    def _register_outgoing(
-        self,
-        business_id: int,
-        recipient: RecipientInfo,
-        sent: list[tuple[TemplateMessage, str]],
-    ) -> None:
-        for template, meta_message_id in sent:
-            self._backend.register_outgoing_message(
-                business_id=business_id,
-                user_phone=recipient.phone,
-                user_name=recipient.name,
-                meta_message_id=meta_message_id,
-                media_type=template.media_type(),
-                message=template.log_message(),
-                media_id=template.log_media_id(),
-                guide_number=recipient.tracking_number,
-            )
-
-    @classmethod
-    def _tracking(cls, order: dict) -> str:
-        return cls._clean(order.get("tracking_code"))
-
-    @classmethod
-    def _order_key(cls, order: dict) -> str:
-        return cls._clean(order.get("order_id")) or cls._tracking(order) or str(id(order))
-
-    @staticmethod
-    def _clean(value, limit_key: str | None = None) -> str:
-        """Texto en una sola línea: Meta rechaza parámetros de plantilla
-        con saltos de línea, tabs o más de 4 espacios seguidos."""
-        text = re.sub(r"\s+", " ", str(value or "")).strip()
-        if limit_key:
-            text = text[:FIELD_LIMITS[limit_key]]
-        return text
-
-
-def _compact(text: str) -> str:
-    """Solo letras y números, sin tildes ni mayúsculas: para comparar
-    "Interrapidísimo" con "INTER RAPIDISIMO"."""
-    plain = unicodedata.normalize("NFKD", text).encode("ascii", "ignore").decode().lower()
-    return re.sub(r"[^a-z0-9]", "", plain)
-
-
-def _as_int(value) -> int | None:
-    try:
-        return int(value)
-    except (TypeError, ValueError):
-        return None
-
-
-def _as_float(value) -> float | None:
-    try:
-        number = float(value)
-    except (TypeError, ValueError):
-        return None
-    # NaN/inf no son JSON válido para el backend.
-    return number if math.isfinite(number) else None

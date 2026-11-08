@@ -22,6 +22,9 @@ pub trait GuideRepositoryTrait: Send + Sync {
     async fn get_guides_with_details(&self, numbers: &[String]) -> Result<Vec<GuideWithDetails>, String>;
     /// Marca cuándo se notificó la guía por última vez.
     async fn mark_notified(&self, number: &str, timestamp: NaiveDateTime) -> Result<bool, String>;
+    /// Sube el nivel de seguimiento notificado de la guía. No cambia nada
+    /// si ya tenía ese nivel o uno mayor. Retorna true si lo subió.
+    async fn raise_tracking_level(&self, number: &str, level: i16, timestamp: NaiveDateTime) -> Result<bool, String>;
     /// Notificaciones por día y tipo para el dashboard del business.
     async fn get_notification_stats(
         &self,
@@ -49,7 +52,8 @@ impl GuideRepositoryTrait for PostgresGuideRepository {
             INSERT INTO guides (number, user_id, business_id)
             VALUES ($1, $2, $3)
             ON CONFLICT (number) DO NOTHING
-            RETURNING number, user_id, business_id, last_notification_timestamp, notification_count
+            RETURNING number, user_id, business_id, last_notification_timestamp, notification_count,
+                      tracking_level, tracking_notified_at
         "#;
 
         sqlx::query_as::<_, Guide>(query)
@@ -63,7 +67,8 @@ impl GuideRepositoryTrait for PostgresGuideRepository {
 
     async fn get_guide_by_number(&self, number: &str) -> Result<Option<Guide>, String> {
         let query = r#"
-            SELECT number, user_id, business_id, last_notification_timestamp, notification_count
+            SELECT number, user_id, business_id, last_notification_timestamp, notification_count,
+                   tracking_level, tracking_notified_at
             FROM guides WHERE number = $1
         "#;
 
@@ -76,7 +81,8 @@ impl GuideRepositoryTrait for PostgresGuideRepository {
 
     async fn get_guides(&self, user_phone: Option<&str>) -> Result<Vec<Guide>, String> {
         let mut query = sqlx::QueryBuilder::new(
-            "SELECT number, user_id, business_id, last_notification_timestamp, notification_count FROM guides WHERE 1=1"
+            "SELECT number, user_id, business_id, last_notification_timestamp, notification_count, \
+             tracking_level, tracking_notified_at FROM guides WHERE 1=1"
         );
 
         if let Some(phone) = user_phone {
@@ -166,6 +172,7 @@ impl GuideRepositoryTrait for PostgresGuideRepository {
 
         let guides_query = r#"
             SELECT number, user_id, business_id, last_notification_timestamp, notification_count,
+                   tracking_level, tracking_notified_at,
                    order_id, customer_name, customer_document, delivery_address, city,
                    shipping_company, order_total::float8 AS total, currency
             FROM guides WHERE number = ANY($1)
@@ -220,6 +227,26 @@ impl GuideRepositoryTrait for PostgresGuideRepository {
 
         let result = sqlx::query(query)
             .bind(number)
+            .bind(timestamp)
+            .execute(&self.db_pool)
+            .await
+            .map_err(|e| e.to_string())?;
+
+        Ok(result.rows_affected() > 0)
+    }
+
+    async fn raise_tracking_level(&self, number: &str, level: i16, timestamp: NaiveDateTime) -> Result<bool, String> {
+        // La condición hace el cambio atómico: el nivel nunca baja y una
+        // segunda marca del mismo nivel no hace nada.
+        let query = r#"
+            UPDATE guides
+            SET tracking_level = $2, tracking_notified_at = $3::timestamp
+            WHERE number = $1 AND tracking_level < $2
+        "#;
+
+        let result = sqlx::query(query)
+            .bind(number)
+            .bind(level)
             .bind(timestamp)
             .execute(&self.db_pool)
             .await

@@ -354,6 +354,10 @@ mod tests {
             unimplemented!()
         }
 
+        async fn mark_tracking(&self, _: &str, _: i16) -> Result<bool, String> {
+            unimplemented!()
+        }
+
         async fn get_notification_stats(
             &self,
             _: i32,

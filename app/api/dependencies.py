@@ -14,6 +14,7 @@ from app.services.associate_directory import AssociateDirectory
 from app.services.backend_client import RustBackendClient
 from app.services.dropi_client import N8nDropiClient
 from app.services.dropi_notifier import DropiNotificationService
+from app.services.dropi_tracking_notifier import DropiTrackingNotificationService
 from app.services.google_sheets import GoogleSheetClient
 from app.services.pdf_extractor import PdfTextExtractor
 from app.services.product_videos import ProductVideoLibrary
@@ -66,12 +67,17 @@ def get_sheet_notifier() -> SheetNotificationService:
     )
 
 
-@lru_cache
-def get_dropi_notifier() -> DropiNotificationService:
-    settings = get_settings()
+def _dropi_order_source(settings: Settings) -> N8nDropiClient:
     if not settings.n8n_api_key:
         # Los webhooks de N8N rechazan las peticiones sin api-key.
         raise HTTPException(status_code=503, detail="N8N_API_KEY no está configurado")
+    return N8nDropiClient(base_url=settings.dropi_n8n_url, api_key=settings.n8n_api_key)
+
+
+@lru_cache
+def get_dropi_notifier() -> DropiNotificationService:
+    settings = get_settings()
+    order_source = _dropi_order_source(settings)
 
     # Timeout amplio: subir un video (hasta 16 MB) tarda más que un envío.
     whatsapp_client = WhatsAppClient(
@@ -80,7 +86,7 @@ def get_dropi_notifier() -> DropiNotificationService:
         timeout=120,
     )
     return DropiNotificationService(
-        order_source=N8nDropiClient(base_url=settings.dropi_n8n_url, api_key=settings.n8n_api_key),
+        order_source=order_source,
         backend=get_backend_client(),
         message_sender=whatsapp_client,
         product_videos=ProductVideoLibrary(
@@ -97,6 +103,29 @@ def get_dropi_notifier() -> DropiNotificationService:
 @lru_cache
 def get_dropi_runs() -> RunGuard:
     """Corridas de /notify-dropi-mcp en curso, por business."""
+    return RunGuard()
+
+
+@lru_cache
+def get_dropi_tracking_notifier() -> DropiTrackingNotificationService:
+    settings = get_settings()
+    return DropiTrackingNotificationService(
+        order_source=_dropi_order_source(settings),
+        backend=get_backend_client(),
+        message_sender=WhatsAppClient(
+            access_token=settings.whatsapp_token,
+            phone_number_id=settings.whatsapp_phone_id,
+        ),
+        debug_notification_number=settings.debug_notification_number,
+        notification_override_number=settings.notification_override_number,
+    )
+
+
+@lru_cache
+def get_dropi_tracking_runs() -> RunGuard:
+    """Corridas de /notify-dropi-tracking en curso, por business. Aparte de
+    las de /notify-dropi-mcp: el job de cada 15 minutos no bloquea (ni
+    queda bloqueado por) la notificación de pedidos en oficina."""
     return RunGuard()
 
 

@@ -47,13 +47,15 @@ app/
 │   ├── google_sheets.py     # Descarga de hojas de Google Sheets (polars)
 │   ├── sheet_notifier.py    # Notificación masiva desde el Google Sheet
 │   ├── dropi_client.py      # Cliente de los webhooks de N8N (MCP de Dropi)
+│   ├── dropi_orders.py      # Base común de las notificaciones de Dropi
 │   ├── dropi_notifier.py    # Notificación de pedidos de Dropi en oficina
+│   ├── dropi_tracking_notifier.py  # Seguimiento del envío de Dropi por niveles
 │   ├── product_videos.py    # Video de cada producto y caché de su media_id
 │   └── associate_directory.py  # Asociados autorizados en RAM (cargados del backend)
 └── api/
     ├── dependencies.py      # Composition root (inyección de dependencias)
     ├── notify_sheet.py      # POST /notify-sheet (notificación masiva)
-    ├── notify_dropi.py      # POST /notify-dropi-mcp (pedidos de Dropi)
+    ├── notify_dropi.py      # POST /notify-dropi-mcp y /notify-dropi-tracking (Dropi)
     └── webhook.py           # Router FastAPI (GET/POST /webhook)
 tests/                       # Tests del bot (pytest, sin servicios externos)
 ```
@@ -250,6 +252,65 @@ existente (es idempotente) agrega las columnas de pedido a `guides` y la
 tabla `guide_products` (y le quita `unit_price` y `subtotal` si se
 habían creado).
 
+### Seguimiento del envío de pedidos de Dropi (por niveles)
+
+`POST /notify-dropi-tracking?business_id=N` notifica el avance del pedido
+**antes** de que llegue a la oficina. Pensado para un job cada 15 minutos.
+Mismas reglas que `/notify-dropi-mcp`: responde 202 y procesa en segundo
+plano, el `business_id` es obligatorio (404 si no existe), el body
+opcional es el mismo (`from` por defecto hace 15 días, `until`,
+`result_number`, `start`) y responde 409 mientras haya otra corrida de
+seguimiento del mismo business. Tiene su propio control de corridas: no
+bloquea a `/notify-dropi-mcp` ni queda bloqueado por él.
+
+```bash
+curl -X POST "localhost:8000/notify-dropi-tracking?business_id=1"
+```
+
+| Nivel | Estados de Dropi | Plantilla |
+|---|---|---|
+| 1 | `GUIA_GENERADA`, `PREPARADO PARA TRANSPORTADORA`, `ENTREGADO A TRANSPORTADORA`, `ADMITIDA`, `RECOLECTADO` | `pedido_enviado_1` (nombre, guía, producto, valor a pagar, transportadora) |
+| 2 | `EN TRANSPORTE`, `EN REPARTO`, `DESPACHADA`, `EN DESPACHO`, `EN RUTA` | `pedido_camino_1` (nombre, producto, guía, dirección y ciudad de entrega) |
+| 3 | `RECLAME EN OFICINA` | lo maneja `/notify-dropi-mcp` |
+
+Los estados viven en `TRACKING_LEVELS`
+(`app/services/dropi_tracking_notifier.py`) y se escriben exactamente como
+en Dropi: el genérico es `GUIA_GENERADA` (con guion bajo); `GUIA GENERADA`
+es un estado de SUPPLI-EXPRESS y no trae pedidos de las demás.
+
+1. `/ordenes` acepta un solo estado por consulta: por cada estado de cada
+   nivel se pagina igual que en `/notify-dropi-mcp` (mientras
+   `count == result_number`, `start += count`). Un pedido que cambió de
+   estado entre dos consultas cuenta en su nivel más alto.
+2. Consulta en lote al backend (`POST /guides/lookup`) el nivel ya
+   notificado de cada guía (`tracking_level`) y sus datos de pedido.
+3. **Una notificación por nivel por guía, y los niveles nunca
+   retroceden**: se envía solo si el nivel del pedido es mayor que el ya
+   notificado. Un pedido que se ve por primera vez en el nivel 2 recibe
+   solo `pedido_camino_1`; uno que vuelve a un estado del nivel 1 no
+   recibe nada; uno ya notificado en oficina (`notification_count > 0`,
+   por Dropi, PDF o Google Sheet) no recibe ninguna de estas.
+4. Tras enviar la plantilla, `POST /guides/{number}/tracking` sube el
+   nivel. Si el envío falla el nivel no sube y se reintenta en la próxima
+   corrida. No toca `notification_count`: la notificación en oficina
+   empieza igual por `mensaje_guia_es`.
+
+El detalle del pedido (`/orden`) se pide una sola vez, la primera vez
+que se ve el pedido, y se guarda con la guía: el nivel 2 y la
+notificación en oficina (`/notify-dropi-mcp`) ya no lo vuelven a pedir.
+El valor a pagar es `0` si la tarifa es `SIN RECAUDO`.
+
+La primera corrida notifica todos los pedidos que ya estén en el nivel 1
+o 2 dentro del rango de fechas; para empezar con menos, enviar un `from`
+reciente.
+
+Despliegue, en este orden: 1) correr `webapp/backend/db.sql` (agrega
+`tracking_level` y `tracking_notified_at` a `guides`; el backend nuevo
+las lee en todas las consultas de guías), 2) desplegar el backend,
+3) desplegar el bot. Si el backend no devuelve `tracking_level`, la
+corrida no envía nada (registra el error en los logs) para no repetir
+notificaciones.
+
 ## Agregar una nueva plantilla de WhatsApp
 
 Cada plantilla registrada en Meta Business tiene su propia clase en
@@ -441,6 +502,7 @@ Solo para el bot (token de api_key; un asociado recibe 403) y la administración
 | POST | `/guides` | Registrar guía; responde `created: false` si es duplicada (no re-notificar). `details` opcional (cliente y productos del pedido) se guarda aunque la guía ya existiera |
 | POST | `/guides/lookup` | `{"numbers": [...]}` (máx. 500) → guías existentes con `notification_count`, `details` y `products` |
 | POST | `/guides/{number}/notified` | Marcar cuándo se notificó la guía |
+| POST | `/guides/{number}/tracking` | `{"level": 1\|2}`: nivel de seguimiento del envío notificado. Solo sube (`updated: false` si ya tenía ese nivel o uno mayor); 404 si la guía no existe |
 
 La sesión usa JWT en `localStorage` (15 min, renovado automáticamente al
 enviar mensajes libres). Pendiente: refresh tokens y cookies httpOnly para

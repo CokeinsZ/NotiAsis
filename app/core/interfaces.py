@@ -176,6 +176,12 @@ class NotificationBackend(ABC):
         """Marca la guía como notificada al destinatario."""
 
     @abstractmethod
+    def mark_guide_tracking(self, number: str, level: int) -> None:
+        """Registra que la guía recibió la notificación de seguimiento del
+        envío del nivel `level` (1 o 2). El backend solo sube el nivel y no
+        toca `notification_count` (el del nivel 3, reclame en oficina)."""
+
+    @abstractmethod
     def register_incoming_message(
         self,
         *,

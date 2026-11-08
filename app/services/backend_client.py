@@ -170,6 +170,13 @@ class RustBackendClient(NotificationBackend):
         except Exception as e:
             print(f"Error marking guide {number} as notified: {e}")
 
+    def mark_guide_tracking(self, number: str, level: int) -> None:
+        try:
+            response = self._request("POST", f"/guides/{number}/tracking", json={"level": level})
+            response.raise_for_status()
+        except Exception as e:
+            print(f"Error marking tracking level {level} of guide {number}: {e}")
+
     def register_incoming_message(
         self,
         *,

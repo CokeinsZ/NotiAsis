@@ -7,7 +7,7 @@ use axum::{
 use validator::Validate;
 
 use crate::auth::middleware::{AuthenticatedClaims, require_bot};
-use crate::guides::dtos::{GuideFilters, GuideLookupDto, RegisterGuideDto};
+use crate::guides::dtos::{GuideFilters, GuideLookupDto, MarkTrackingDto, RegisterGuideDto};
 use crate::state::GuideState;
 use crate::tools::responses::{build_validation_response, json_response};
 
@@ -150,12 +150,44 @@ async fn mark_guide_notified(
     }
 }
 
+/// El bot registra la notificación de seguimiento del envío (nivel 1 o 2)
+/// tras enviar la plantilla. El nivel solo sube: `updated: false` si la
+/// guía ya tenía ese nivel o uno mayor (no se vuelve a notificar).
+async fn mark_guide_tracking(
+    claims: AuthenticatedClaims,
+    State(state): State<GuideState>,
+    Path(number): Path<String>,
+    Json(body): Json<MarkTrackingDto>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    if let Err(response) = require_bot(&claims.0) {
+        return response;
+    }
+    if let Err(errors) = body.validate() {
+        return build_validation_response(errors);
+    }
+
+    match state.guide_service.mark_tracking(&number, body.level).await {
+        Ok(updated) => json_response(
+            StatusCode::OK,
+            serde_json::json!({
+                "message": format!("Guide {number} tracking level {}", body.level),
+                "updated": updated
+            }),
+        ),
+        Err(e) => {
+            let status = if e == "Guide not found" { StatusCode::NOT_FOUND } else { StatusCode::BAD_REQUEST };
+            json_response(status, serde_json::json!({ "message": e }))
+        }
+    }
+}
+
 pub fn guide_routes(state: GuideState) -> Router {
     Router::new()
         .route("/", post(register_guide).get(get_guides))
         .route("/lookup", post(lookup_guides))
         .route("/{number}", get(get_guide))
         .route("/{number}/notified", post(mark_guide_notified))
+        .route("/{number}/tracking", post(mark_guide_tracking))
         .with_state(state)
 }
 
@@ -197,6 +229,10 @@ mod tests {
             unreachable!()
         }
 
+        async fn mark_tracking(&self, _: &str, _: i16) -> Result<bool, String> {
+            unreachable!()
+        }
+
         async fn get_notification_stats(
             &self,
             _: i32,
@@ -221,6 +257,7 @@ mod tests {
             ("GET", "/", json!({})),
             ("GET", "/G1", json!({})),
             ("POST", "/G1/notified", json!({})),
+            ("POST", "/G1/tracking", json!({ "level": 1 })),
             ("POST", "/lookup", json!({ "numbers": ["G1"] })),
         ] {
             assert_eq!(status_of(&routes, method, uri, "asociado-7", body).await, StatusCode::FORBIDDEN, "{method} {uri}");

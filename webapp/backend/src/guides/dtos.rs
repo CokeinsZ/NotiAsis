@@ -18,6 +18,10 @@ pub struct Guide {
     pub business_id: i32,
     pub last_notification_timestamp: Option<NaiveDateTime>,
     pub notification_count: i32,
+    /// Nivel de seguimiento del envío más alto ya notificado (0 = ninguno,
+    /// 1 = pedido_enviado_1, 2 = pedido_camino_1). Solo sube.
+    pub tracking_level: i16,
+    pub tracking_notified_at: Option<NaiveDateTime>,
 }
 
 /// El bot registra aquí cada guía recibida. Si el número de guía ya
@@ -99,6 +103,14 @@ fn default_quantity() -> i32 {
 pub struct GuideLookupDto {
     #[validate(length(min = 1, max = 500, message = "Se deben consultar entre 1 y 500 guías"))]
     pub numbers: Vec<String>,
+}
+
+/// El bot registra la notificación de seguimiento del envío de un pedido
+/// de Dropi (el nivel 3, reclame en oficina, usa `notification_count`).
+#[derive(Debug, Serialize, Deserialize, Validate)]
+pub struct MarkTrackingDto {
+    #[validate(range(min = 1, max = 2, message = "El nivel de seguimiento debe ser 1 o 2"))]
+    pub level: i16,
 }
 
 /// Datos del pedido guardados en las columnas de `guides`.
@@ -239,6 +251,14 @@ mod tests {
         assert!(with_products(vec![product("Collar", 1)]).validate().is_ok());
         assert!(with_products(vec![product("   ", 1)]).validate().is_err());
         assert!(with_products(vec![product("Collar", 0)]).validate().is_err());
+    }
+
+    #[test]
+    fn tracking_level_must_be_1_or_2() {
+        assert!(MarkTrackingDto { level: 1 }.validate().is_ok());
+        assert!(MarkTrackingDto { level: 2 }.validate().is_ok());
+        assert!(MarkTrackingDto { level: 0 }.validate().is_err());
+        assert!(MarkTrackingDto { level: 3 }.validate().is_err());
     }
 
     #[test]
