@@ -21,16 +21,23 @@ export interface ChatSummary {
 export type MediaType = "text" | "document" | "audio" | "image" | "video";
 export type MessageStatus = "sent" | "delivered" | "read";
 
-/** Fila cruda del backend: notificaciones por día y notification_count. */
+/** Fila cruda del backend: notificaciones por día, tipo y notification_count. */
 export interface NotificationStatRow {
   day: string; // "2026-08-30"
-  notification_count: number; // 1=inicial, 2=recordatorio, 3=final, 4+=diario
+  /** "office": escalación de la guía; "tracking": seguimiento del envío de Dropi. */
+  kind: "office" | "tracking";
+  /** office: 1=inicial, 2=recordatorio, 3=final, 4+=diario · tracking: nivel 1 o 2. */
+  notification_count: number;
   total: number;
 }
 
-/** Un día de la gráfica, con los cuatro tipos ya pivotados. */
+/** Un día de la gráfica, con los seis tipos ya pivotados. */
 export interface DayStats {
   day: string;
+  /** Seguimiento nivel 1 (pedido_enviado_1): listo para envío. */
+  shipped: number;
+  /** Seguimiento nivel 2 (pedido_camino_1): en camino. */
+  inTransit: number;
   initial: number;
   reminder: number;
   final: number;

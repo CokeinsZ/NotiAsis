@@ -22,8 +22,9 @@ pub trait GuideRepositoryTrait: Send + Sync {
     async fn get_guides_with_details(&self, numbers: &[String]) -> Result<Vec<GuideWithDetails>, String>;
     /// Marca cuándo se notificó la guía por última vez.
     async fn mark_notified(&self, number: &str, timestamp: NaiveDateTime) -> Result<bool, String>;
-    /// Sube el nivel de seguimiento notificado de la guía. No cambia nada
-    /// si ya tenía ese nivel o uno mayor. Retorna true si lo subió.
+    /// Sube el nivel de seguimiento notificado de la guía y lo registra en
+    /// guide_notifications (kind 'tracking'). No cambia nada si ya tenía ese
+    /// nivel o uno mayor. Retorna true si lo subió.
     async fn raise_tracking_level(&self, number: &str, level: i16, timestamp: NaiveDateTime) -> Result<bool, String>;
     /// Notificaciones por día y tipo para el dashboard del business.
     async fn get_notification_stats(
@@ -237,11 +238,18 @@ impl GuideRepositoryTrait for PostgresGuideRepository {
 
     async fn raise_tracking_level(&self, number: &str, level: i16, timestamp: NaiveDateTime) -> Result<bool, String> {
         // La condición hace el cambio atómico: el nivel nunca baja y una
-        // segunda marca del mismo nivel no hace nada.
+        // segunda marca del mismo nivel no hace nada. Cada subida queda en
+        // guide_notifications (kind 'tracking') para el dashboard.
         let query = r#"
-            UPDATE guides
-            SET tracking_level = $2, tracking_notified_at = $3::timestamp
-            WHERE number = $1 AND tracking_level < $2
+            WITH updated AS (
+                UPDATE guides
+                SET tracking_level = $2, tracking_notified_at = $3::timestamp
+                WHERE number = $1 AND tracking_level < $2
+                RETURNING number, business_id, user_id, tracking_level, tracking_notified_at
+            )
+            INSERT INTO guide_notifications (guide_number, business_id, user_id, notification_step, kind, created_at)
+            SELECT number, business_id, user_id, tracking_level, 'tracking', tracking_notified_at
+            FROM updated
         "#;
 
         let result = sqlx::query(query)
@@ -265,6 +273,7 @@ impl GuideRepositoryTrait for PostgresGuideRepository {
         let mut query = sqlx::QueryBuilder::new(
             r#"SELECT
                 created_at::date AS day,
+                kind,
                 notification_step AS notification_count,
                 COUNT(*) AS total
             FROM guide_notifications
@@ -287,7 +296,7 @@ impl GuideRepositoryTrait for PostgresGuideRepository {
             query.push_bind(end);
         }
 
-        query.push(" GROUP BY day, notification_step ORDER BY day, notification_step");
+        query.push(" GROUP BY day, kind, notification_step ORDER BY day, kind, notification_step");
 
         query.build_query_as::<DailyNotificationStat>()
             .fetch_all(&self.db_pool)

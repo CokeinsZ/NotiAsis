@@ -161,13 +161,16 @@ pub struct GuideFilters {
     pub user_phone: Option<String>,
 }
 
-/// Fila de estadísticas: notificaciones de guías por día y tipo
-/// (notification_count: 1=inicial, 2=recordatorio, 3=recordatorio final,
-/// 4+=seguimiento diario de pedidos de Dropi).
+/// Fila de estadísticas: notificaciones de guías por día y tipo.
+/// - kind "office": notification_count 1=inicial, 2=recordatorio,
+///   3=recordatorio final, 4+=seguimiento diario de pedidos de Dropi.
+/// - kind "tracking": seguimiento del envío de Dropi, notification_count
+///   es el nivel (1=pedido enviado, 2=pedido en camino).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[derive(sqlx::FromRow)]
 pub struct DailyNotificationStat {
     pub day: chrono::NaiveDate,
+    pub kind: String,
     pub notification_count: i32,
     pub total: i64,
 }

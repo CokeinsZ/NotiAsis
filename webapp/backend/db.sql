@@ -240,6 +240,12 @@ CREATE TABLE IF NOT EXISTS guide_notifications (
 		ON UPDATE CASCADE
 );
 
+-- Tipo de notificación (dashboard): 'office' es la escalación de la guía
+-- (notification_step = notification_count: 1 inicial, 2 recordatorio,
+-- 3 final, 4+ diario); 'tracking' es el seguimiento del envío de Dropi
+-- (notification_step = nivel: 1 pedido_enviado_1, 2 pedido_camino_1).
+ALTER TABLE guide_notifications ADD COLUMN IF NOT EXISTS kind VARCHAR(16) NOT NULL DEFAULT 'office';
+
 CREATE INDEX IF NOT EXISTS idx_messages_chat_time ON messages (business_id, user_id, created_at DESC);
 -- Autorizar la descarga de multimedia: el media_id debe ser de un mensaje del business.
 CREATE INDEX IF NOT EXISTS idx_messages_media ON messages (media_id) WHERE media_id IS NOT NULL;

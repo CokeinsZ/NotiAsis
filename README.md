@@ -126,6 +126,17 @@ dueño) devuelve las notificaciones por día y tipo. La webapp lo muestra en
 `/chats/{businessId}/dashboard` (icono de gráfica junto al nombre del
 business): barras apiladas por día con selector de 7/30/90 días.
 
+Cada fila trae `kind` y `notification_count` (tabla `guide_notifications`):
+
+| `kind` | `notification_count` | En el dashboard |
+|---|---|---|
+| `tracking` | 1 | Pedido enviado (`pedido_enviado_1`) |
+| `tracking` | 2 | Pedido en camino (`pedido_camino_1`) |
+| `office` | 1 | Oficina inicial |
+| `office` | 2 | Recordatorio |
+| `office` | 3 | Recordatorio final |
+| `office` | 4+ | Seguimiento diario (`pedido_oficina`) |
+
 ### Notificación masiva desde Google Sheet
 
 `POST /notify-sheet` con `{"business_id": N}` (responde 202 y procesa en
@@ -293,7 +304,9 @@ es un estado de SUPPLI-EXPRESS y no trae pedidos de las demás.
 4. Tras enviar la plantilla, `POST /guides/{number}/tracking` sube el
    nivel. Si el envío falla el nivel no sube y se reintenta en la próxima
    corrida. No toca `notification_count`: la notificación en oficina
-   empieza igual por `mensaje_guia_es`.
+   empieza igual por `mensaje_guia_es`. Cada subida de nivel queda en
+   `guide_notifications` (`kind = 'tracking'`) y sale en el dashboard
+   como "Pedido enviado" / "Pedido en camino".
 
 El detalle del pedido (`/orden`) se pide una sola vez, la primera vez
 que se ve el pedido, y se guarda con la guía: el nivel 2 y la
@@ -305,8 +318,9 @@ o 2 dentro del rango de fechas; para empezar con menos, enviar un `from`
 reciente.
 
 Despliegue, en este orden: 1) correr `webapp/backend/db.sql` (agrega
-`tracking_level` y `tracking_notified_at` a `guides`; el backend nuevo
-las lee en todas las consultas de guías), 2) desplegar el backend,
+`tracking_level` y `tracking_notified_at` a `guides` y `kind` a
+`guide_notifications`; el backend nuevo las lee en las consultas de
+guías y del dashboard), 2) desplegar el backend y el frontend,
 3) desplegar el bot. Si el backend no devuelve `tracking_level`, la
 corrida no envía nada (registra el error en los logs) para no repetir
 notificaciones.
