@@ -6,6 +6,7 @@ Todo con dobles de prueba: sin Google, sin Meta, sin backend real.
 import polars as pl
 import pytest
 
+from app.models.quota import QuotaReservation
 from app.core.phones import PhoneCountry
 from app.services.sheet_notifier import SheetNotificationService
 
@@ -46,7 +47,8 @@ class FakeSheetSource:
 
 
 class FakeBackend:
-    def __init__(self, existing_guides=(), guide_counts=None, sheet_config=None):
+    def __init__(self, existing_guides=(), guide_counts=None, sheet_config=None, quota_capacity=None,
+                 quota_fails=False):
         # existing_guides: guías notificadas 1 vez (atajo); guide_counts: {guia: count}
         self.guide_counts = {n: 1 for n in existing_guides}
         self.guide_counts.update(guide_counts or {})
@@ -58,6 +60,11 @@ class FakeBackend:
         self.guides_registered = []
         self.guides_notified = []
         self.notified_messages = []  # mensaje ligado a cada marca
+        # Cupo de mensajería: None = aprueba todo.
+        self.quota_capacity = quota_capacity
+        self.quota_fails = quota_fails
+        self.quota_requests = []
+        self.quota_released = []
         self.outgoing = []
         self.country = PhoneCountry("57", 10)
 
@@ -95,6 +102,22 @@ class FakeBackend:
     # Métodos no usados por este servicio
     def fetch_authorized_associates(self): return {}
     def register_incoming_message(self, **kwargs): pass
+    def reserve_quota(self, phones, kind, business_id, ttl_minutes):
+        self.quota_requests.append((list(phones), kind, business_id))
+        if self.quota_fails:
+            return None
+        approved = list(phones) if self.quota_capacity is None else list(phones)[: self.quota_capacity]
+        if self.quota_capacity is not None:
+            self.quota_capacity -= len(approved)
+        return QuotaReservation(
+            approved_phones=tuple(approved),
+            denied_phones=tuple(p for p in phones if p not in approved),
+            reservation_id=len(self.quota_requests) if approved else None,
+        )
+
+    def release_quota(self, reservation_id):
+        self.quota_released.append(reservation_id)
+
     def update_message_status(self, *a): pass
 
 
@@ -294,7 +317,9 @@ def test_mixed_scenario_full_flow():
     assert report.new_notifications == 1
     assert report.skipped == ["G13"]
     templates_sent = [name for _, name, _ in sender.sent]
-    assert templates_sent == ["recordatorio", "guia", "mensaje_guia_es"]
+    # El aviso inicial va primero: si el cupo de mensajería no alcanza,
+    # es el que más importa.
+    assert templates_sent == ["guia", "mensaje_guia_es", "recordatorio"]
 
 
 # ------------------------------ Override / debug ------------------------------
@@ -416,3 +441,40 @@ def test_guide_notified_yesterday_gets_reminder():
 
     assert report.reminders == 1
     assert [name for _, name, _ in sender.sent] == ["recordatorio"]
+
+
+# ------------------------------ Cupo de mensajería ------------------------------
+
+
+def test_without_quota_the_sheet_defers_without_downloading_the_pdf():
+    service, sheet_source, backend, sender, uploader = build_service(
+        office_rows=[office_row("Ya Notificado", "3222222222", "G11"), office_row("Nuevo", "3333333333", "G12")],
+        delivered_rows=[],
+        existing_guides={"G11"},
+    )
+    backend.quota_capacity = 1
+
+    report = service.notify_business_sheet(1)
+
+    # Aviso inicial primero: G12 entra, el recordatorio de G11 espera.
+    assert backend.quota_requests == [(["573333333333", "573222222222"], "office", 1)]
+    assert report.new_notifications == 1
+    assert report.deferred == ["G11"]
+    assert [name for _, name, _ in sender.sent] == ["guia", "mensaje_guia_es"]
+    assert backend.guides_notified == ["G12"]
+    assert backend.quota_released == [1]
+
+
+def test_sheet_without_quota_downloads_nothing():
+    service, sheet_source, backend, sender, uploader = build_service(
+        office_rows=[office_row("Nuevo", "3333333333", "G12")], delivered_rows=[],
+    )
+    backend.quota_capacity = 0
+
+    report = service.notify_business_sheet(1)
+
+    assert report.deferred == ["G12"]
+    assert sender.sent == []
+    assert sheet_source.downloads == []
+    assert uploader.uploads == []
+    assert backend.guides_registered == []

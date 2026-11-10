@@ -9,9 +9,11 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import date
 
 import pytest
+import requests
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+from app.models.quota import QuotaReservation
 from app.api.dependencies import (
     get_backend_client,
     get_dropi_notifier,
@@ -66,9 +68,11 @@ class FakeBackend:
     """Guarda las guías como el backend: register_guide las crea y
     mark_guide_tracking solo sube el nivel."""
 
-    def __init__(self, guides=None, lookup_fails=False, country=COLOMBIA, without_tracking_level=False):
+    def __init__(self, guides=None, lookup_fails=False, country=COLOMBIA, without_tracking_level=False,
+                 rejects_guides=False, quota_capacity=None, quota_fails=False):
         self.guides = guides or {}
         self.lookup_fails = lookup_fails
+        self.rejects_guides = rejects_guides  # el backend responde 400 (datos inválidos)
         self.country = country
         self.without_tracking_level = without_tracking_level
         self.registered = []
@@ -76,6 +80,11 @@ class FakeBackend:
         self.notified = []
         self.tracking_messages = []  # mensaje ligado a cada marca de nivel
         self.outgoing = []
+        # Cupo de mensajería: None = aprueba todo.
+        self.quota_capacity = quota_capacity
+        self.quota_fails = quota_fails
+        self.quota_requests = []
+        self.quota_released = []
 
     def get_business_country(self, business_id):
         return self.country
@@ -92,7 +101,7 @@ class FakeBackend:
     def register_guide(self, number, user_phone, user_name, business_id, details=None):
         self.registered.append({"number": number, "user_phone": user_phone, "user_name": user_name,
                                 "business_id": business_id, "details": details})
-        if number in self.guides:
+        if number in self.guides or self.rejects_guides:
             return False
         products = (details or {}).get("products") or []
         stored = {k: v for k, v in (details or {}).items() if k != "products"}
@@ -108,6 +117,22 @@ class FakeBackend:
 
     def mark_guide_notified(self, number, meta_message_id=None):
         self.notified.append(number)
+
+    def reserve_quota(self, phones, kind, business_id, ttl_minutes):
+        self.quota_requests.append((list(phones), kind, business_id))
+        if self.quota_fails:
+            return None
+        approved = list(phones) if self.quota_capacity is None else list(phones)[: self.quota_capacity]
+        if self.quota_capacity is not None:
+            self.quota_capacity -= len(approved)
+        return QuotaReservation(
+            approved_phones=tuple(approved),
+            denied_phones=tuple(p for p in phones if p not in approved),
+            reservation_id=len(self.quota_requests) if approved else None,
+        )
+
+    def release_quota(self, reservation_id):
+        self.quota_released.append(reservation_id)
 
     def register_outgoing_message(self, **kwargs):
         self.outgoing.append(kwargs)
@@ -622,6 +647,56 @@ def test_backend_client_links_notification_and_reports_message_errors():
     ]
 
 
+def test_guide_rejected_by_backend_is_not_notified():
+    # Antes se enviaba igual (fail-open), la guía nunca quedaba registrada y
+    # la misma plantilla salía en cada corrida (FD45379197, 10 veces el 9 nov).
+    source = FakeDropiSource({LEVEL_1_STATUS: [order("1", "FD45379197")]},
+                             details={"1": order_detail("1", "FD45379197")})
+    service, backend, sender = build_service(source, FakeBackend(rejects_guides=True))
+
+    for _ in range(2):
+        report = run(service)
+        assert report.notified == {}
+        assert report.skipped == ["FD45379197"]
+
+    assert sender.sent == []
+    assert backend.tracking_marks == []
+
+
+def _client_answering(status_code=None, error=None):
+    class Response:
+        def __init__(self):
+            self.status_code = status_code
+            self.text = '{"message": "Validation failed"}'
+
+        def raise_for_status(self):
+            if self.status_code >= 400:
+                raise requests.HTTPError(f"{self.status_code} Error")
+
+        def json(self):
+            return {"created": True}
+
+    class Session:
+        def request(self, *args, **kwargs):
+            if error:
+                raise error
+            return Response()
+
+    client = RustBackendClient("http://backend", api_key="k")
+    client._token = "token"
+    client._session = Session()
+    return client
+
+
+def test_backend_client_does_not_notify_guides_it_cannot_register():
+    assert _client_answering(201).register_guide("G1", "488760023", "X", 2) is True
+    # Datos inválidos: no notificar (se repetiría en cada corrida).
+    assert _client_answering(400).register_guide("G1", "1234", "X", 2) is False
+    # Backend caído: tampoco (mejor perder la notificación que notificar duplicado).
+    assert _client_answering(500).register_guide("G1", "488760023", "X", 2) is False
+    assert _client_answering(error=requests.ConnectionError("down")).register_guide("G1", "488760023", "X", 2) is False
+
+
 # ------------------------------ Endpoint ------------------------------
 
 
@@ -711,3 +786,39 @@ def test_endpoint_one_run_per_business_without_blocking_office_notification():
     assert [run[0] for run in office.runs] == [3]
     # Terminada la primera, el business 3 se puede volver a correr.
     assert client.post("/notify-dropi-tracking?business_id=3").status_code == 202
+
+
+# ------------------------------ Cupo de mensajería ------------------------------
+
+
+def test_tracking_reserves_its_own_quota_and_defers_what_does_not_fit():
+    source = FakeDropiSource(
+        {LEVEL_1_STATUS: [order("1", "G1", phone="3000000001"), order("2", "G2", phone="3000000002")]},
+        details={"1": order_detail("1", "G1"), "2": order_detail("2", "G2")},
+    )
+    service, backend, sender = build_service(source, FakeBackend(quota_capacity=1))
+
+    report = run(service)
+
+    assert backend.quota_requests == [(["573000000001", "573000000002"], "tracking", BUSINESS_ID)]
+    assert report.notified == {1: 1}
+    assert report.deferred == ["G2"]
+    assert source.order_calls == ["1"]  # sin cupo ni se consulta el detalle a Dropi
+    assert backend.tracking_marks == [("G1", 1)]
+    assert backend.quota_released == [1]
+
+    # La próxima corrida, con cupo, lo envía.
+    backend.quota_capacity = None
+    assert run(service).notified == {1: 1}
+    assert backend.tracking_marks == [("G1", 1), ("G2", 1)]
+
+
+def test_tracking_without_quota_service_sends_nothing():
+    source = FakeDropiSource({LEVEL_1_STATUS: [order("1", "G1")]}, details={"1": order_detail("1", "G1")})
+    service, backend, sender = build_service(source, FakeBackend(quota_fails=True))
+
+    report = run(service)
+
+    assert sender.sent == []
+    assert backend.tracking_marks == []
+    assert "backend: no se pudo reservar cupo de mensajería" in report.errors

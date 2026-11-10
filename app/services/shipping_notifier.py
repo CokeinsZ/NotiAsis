@@ -118,7 +118,8 @@ class ShippingNotificationService:
                 # registrar la guía; se notifica igual (fail-open).
                 print(f"Guide {tracking_number} will not be registered: associate without business")
             elif not self._backend.register_guide(tracking_number, recipient.phone, recipient.name, business_id):
-                # Carrera rara: otro proceso la registró mientras tanto.
+                # Carrera rara (otro proceso la registró mientras tanto) o el
+                # backend la rechazó o no respondió: no se notifica.
                 return False
             templates = [factory(recipient, media_id) for factory in self._template_factories]
         else:

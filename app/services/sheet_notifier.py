@@ -4,8 +4,10 @@ import polars as pl
 
 from app.core.interfaces import MediaUploader, MessageSender, NotificationBackend, SheetSource
 from app.core.phones import PhoneCountry, to_international
+from app.models.quota import OFFICE
 from app.models.shipping import RecipientInfo
 from app.services.notification_policy import NotificationStep, step_for_notification_count
+from app.services.quota import RunQuota
 from app.whatsapp.templates.base import TemplateMessage
 from app.whatsapp.templates.guia import GuiaTemplate
 from app.whatsapp.templates.mensaje_guia import MensajeGuiaTemplate
@@ -23,6 +25,15 @@ class SheetNotificationReport:
     final_reminders: int = 0
     skipped: list[str] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
+    # Sin cupo de mensajería hoy: la próxima corrida los vuelve a intentar.
+    deferred: list[str] = field(default_factory=list)
+
+
+@dataclass
+class _PlannedNotification:
+    recipient: RecipientInfo
+    row: dict
+    step: NotificationStep
 
 
 class SheetNotificationService:
@@ -37,6 +48,10 @@ class SheetNotificationService:
     - si nunca fue notificada -> descarga el PDF de la columna
       "Guia pdf", lo sube a Meta y envía las plantillas `guia` +
       `mensaje_guia_es`, registrando la guía para no repetir.
+
+    Antes de enviar reserva el cupo de mensajería de todos los clientes
+    (los avisos iniciales primero); los que no caben quedan para la
+    próxima corrida.
     """
 
     def __init__(
@@ -80,14 +95,26 @@ class SheetNotificationService:
         report.total_pending = pending.height
         print(f"Sheet {document_id}: {pending.height} pendientes por reclamar")
 
-        for row in pending.iter_rows(named=True):
-            self._process_row(business_id, country, row, report)
+        plan = [
+            entry
+            for row in pending.iter_rows(named=True)
+            if (entry := self._plan_row(country, row, report)) is not None
+        ]
+        # Si el cupo no alcanza, primero el aviso inicial.
+        plan.sort(key=lambda entry: entry.step is not NotificationStep.INITIAL)
+
+        with RunQuota(self._backend, OFFICE, business_id) as quota:
+            quota.reserve([entry.recipient.phone for entry in plan])
+            if quota.unavailable:
+                report.errors.append("backend: no se pudo reservar cupo de mensajería")
+            for entry in plan:
+                self._send(business_id, entry, quota, report)
 
         print(
             f"Sheet notification done for business {business_id}: "
             f"{report.new_notifications} nuevas, {report.reminders} recordatorios, "
             f"{report.final_reminders} recordatorios finales, "
-            f"{len(report.skipped)} omitidas, {len(report.errors)} errores"
+            f"{len(report.skipped)} omitidas, {len(report.deferred)} sin cupo, {len(report.errors)} errores"
         )
         return report
 
@@ -109,13 +136,14 @@ class SheetNotificationService:
         delivered_valid = delivered.filter(pl.col("numero_guia").is_not_null() & (pl.col("numero_guia") != ""))
         return office_valid.join(delivered_valid, on="numero_guia", how="anti")
 
-    def _process_row(
-        self, business_id: int, country: PhoneCountry, row: dict, report: SheetNotificationReport
-    ) -> None:
+    def _plan_row(
+        self, country: PhoneCountry, row: dict, report: SheetNotificationReport
+    ) -> _PlannedNotification | None:
+        """El paso que le toca hoy a la fila, o None si no se notifica."""
         recipient = self._build_recipient(row, country)
         if recipient is None or not recipient.is_complete:
             report.skipped.append(str(row.get("numero_guia") or row.get("NOMBRE") or "?"))
-            return
+            return None
 
         tracking = recipient.tracking_number
         try:
@@ -123,13 +151,29 @@ class SheetNotificationService:
             count = (guide.get("notification_count") or 0) if guide else 0
             last_notified = guide.get("last_notification_timestamp") if guide else None
             step = step_for_notification_count(count, last_notified)
+        except Exception as e:
+            print(f"Error processing guide {tracking}: {e}")
+            report.errors.append(tracking)
+            return None
 
-            if step is NotificationStep.STOP:
-                report.skipped.append(tracking)
-            elif step is NotificationStep.INITIAL:
-                self._send_new_notification(business_id, recipient, row, report)
+        if step is NotificationStep.STOP:
+            report.skipped.append(tracking)
+            return None
+        return _PlannedNotification(recipient, row, step)
+
+    def _send(
+        self, business_id: int, entry: _PlannedNotification, quota: RunQuota, report: SheetNotificationReport
+    ) -> None:
+        tracking = entry.recipient.tracking_number
+        if not quota.allows(entry.recipient.phone):
+            # Sin cupo: ni se descarga el PDF; la próxima corrida lo reintenta.
+            report.deferred.append(tracking)
+            return
+        try:
+            if entry.step is NotificationStep.INITIAL:
+                self._send_new_notification(business_id, entry.recipient, entry.row, report)
             else:
-                self._send_reminder(business_id, recipient, step, report)
+                self._send_reminder(business_id, entry.recipient, entry.step, report)
         except Exception as e:
             print(f"Error processing guide {tracking}: {e}")
             report.errors.append(tracking)
@@ -227,7 +271,8 @@ class SheetNotificationService:
             return
 
         if not self._backend.register_guide(tracking, recipient.phone, recipient.name, business_id):
-            # Carrera rara: otro proceso la registró mientras tanto.
+            # Carrera rara (otro proceso la registró mientras tanto) o el
+            # backend la rechazó o no respondió: no se notifica.
             report.skipped.append(tracking)
             return
 

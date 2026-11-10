@@ -1,7 +1,14 @@
+import time
+
 import requests
 
 from app.core.interfaces import NotificationBackend
 from app.core.phones import PhoneCountry, normalize_phone
+from app.models.quota import QuotaReservation
+
+# Intentos al pedir cupo si otra corrida lo tiene bloqueado (503).
+QUOTA_ATTEMPTS = 3
+QUOTA_RETRY_SECONDS = 2
 
 
 class RustBackendClient(NotificationBackend):
@@ -93,6 +100,12 @@ class RustBackendClient(NotificationBackend):
             payload["details"] = details
         try:
             response = self._request("POST", "/guides", json=payload)
+            if 400 <= response.status_code < 500:
+                # Datos inválidos (ej. teléfono): sin la guía registrada su
+                # notificación no se puede marcar y se repetiría en cada
+                # corrida. No se notifica.
+                print(f"Guide {number} rejected by backend ({response.status_code}): {response.text}; not notifying")
+                return False
             response.raise_for_status()
             created = bool(response.json().get("created", True))
             if not created:
@@ -100,7 +113,7 @@ class RustBackendClient(NotificationBackend):
             return created
         except Exception as e:
             print(f"Error registering guide {number} in backend: {e}")
-            return True  # fail-open: mejor notificar duplicado que perder la notificación
+            return False  # mejor perder la notificación que notificar duplicado 
 
     def get_guide(self, number: str) -> dict | None:
         try:
@@ -268,6 +281,38 @@ class RustBackendClient(NotificationBackend):
             response.raise_for_status()
         except Exception as e:
             print(f"Error updating status of message {meta_message_id}: {e}")
+
+    def reserve_quota(
+        self, phones: list[str], kind: str, business_id: int, ttl_minutes: int
+    ) -> QuotaReservation | None:
+        payload = {"phones": phones, "kind": kind, "business_id": business_id, "ttl_minutes": ttl_minutes}
+        for attempt in range(1, QUOTA_ATTEMPTS + 1):
+            try:
+                response = self._request("POST", "/quota/reservations", json=payload)
+                if response.status_code == 503 and attempt < QUOTA_ATTEMPTS:
+                    # Otra corrida tiene el cupo bloqueado: reintentar.
+                    print(f"Quota busy, retrying ({attempt}/{QUOTA_ATTEMPTS - 1})")
+                    time.sleep(QUOTA_RETRY_SECONDS)
+                    continue
+                response.raise_for_status()
+                data = response.json()
+                return QuotaReservation(
+                    approved_phones=tuple(data.get("approved_phones") or ()),
+                    denied_phones=tuple(data.get("denied_phones") or ()),
+                    reservation_id=data.get("reservation_id"),
+                )
+            except Exception as e:
+                print(f"Error reserving messaging quota for {len(phones)} phone(s): {e}")
+                return None
+        return None
+
+    def release_quota(self, reservation_id: int) -> None:
+        try:
+            response = self._request("DELETE", f"/quota/reservations/{reservation_id}")
+            response.raise_for_status()
+        except Exception as e:
+            # Vence sola (ttl_minutes): mientras tanto ocupa cupo de más.
+            print(f"Error releasing quota reservation {reservation_id}: {e}")
 
     def register_message_error(
         self,

@@ -640,7 +640,8 @@ def test_client_survives_backend_down():
     client._session = DownSession()
 
     assert client.fetch_authorized_associates() == {}       # fail-open
-    assert client.register_guide("G1", "57300", "Juan", 1)     # no lanza
+    # No lanza; sin la guía registrada no se notifica (se repetiría).
+    assert client.register_guide("G1", "57300", "Juan", 1) is False
 
 
 # ------------------------------ Texto completo de plantillas ------------------------------

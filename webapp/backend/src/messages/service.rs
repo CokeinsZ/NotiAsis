@@ -10,6 +10,7 @@ use crate::messages::dtos::{
 };
 use crate::messages::meta_client::MetaClientTrait;
 use crate::messages::repository::{MessageRepositoryTrait, NewMessage};
+use crate::tools::message_lock::is_permanent_error;
 use crate::tools::phones::normalize_phone;
 use crate::users::repository::UserRepositoryTrait;
 
@@ -588,6 +589,9 @@ impl MessageServiceTrait for MessageService {
         dto: RegisterMessageErrorDto,
     ) -> Result<MessageFailure, String> {
         let failure = self.message_repository.register_failure(meta_message_id, &dto).await?;
+        if is_permanent_error(dto.error_code) {
+            println!("Message {meta_message_id} failed ({:?}): permanent error, notification not retried", dto.error_code);
+        }
         for undone in &failure.undone {
             println!(
                 "Message {meta_message_id} failed ({:?}): guide {:?} {} notification {} undone",

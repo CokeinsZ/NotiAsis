@@ -7,7 +7,8 @@
 
 Ambas paginan /ordenes por estado, piden el detalle del pedido (/orden,
 con rate limit) solo cuando la guía no lo tiene guardado en el backend, y
-envían plantillas registrándolas en el historial del chat.
+envían plantillas registrándolas en el historial del chat. Antes de enviar,
+cada corrida reserva el cupo de mensajería de sus clientes (RunQuota).
 """
 
 import math
@@ -19,6 +20,7 @@ from datetime import date
 from app.core.interfaces import DropiOrderSource, MessageSender, NotificationBackend
 from app.core.phones import PhoneCountry, to_international
 from app.models.shipping import RecipientInfo
+from app.services.quota import RunQuota
 from app.whatsapp.templates.base import TemplateMessage
 
 # Pedido ya pagado: la transportadora no cobra nada al entregarlo.
@@ -52,6 +54,9 @@ class DropiRunReport:
     order_lookups: int = 0
     skipped: list[str] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
+    # Sin cupo de mensajería hoy: no se enviaron ni se marcaron, la próxima
+    # corrida los vuelve a intentar.
+    deferred: list[str] = field(default_factory=list)
 
 
 class DropiOrderNotifier:
@@ -224,6 +229,26 @@ class DropiOrderNotifier:
         return to_international(phone, country)
 
     # ---------------- Envío ----------------
+
+    # ---------------- Cupo de mensajería ----------------
+
+    @staticmethod
+    def _reserve_quota(quota: RunQuota, phones: list[str], report: DropiRunReport) -> None:
+        """Una sola reserva con los teléfonos de la corrida, en orden de
+        prioridad."""
+        quota.reserve(phones)
+        if quota.unavailable:
+            report.errors.append("backend: no se pudo reservar cupo de mensajería")
+
+    @staticmethod
+    def _within_quota(quota: RunQuota, phone: str, tracking: str, report: DropiRunReport) -> bool:
+        """Sin cupo no se envía ni se marca nada: la próxima corrida lo
+        reintenta. Sin teléfono no hay cupo que pedir (la guía se omite
+        después por datos incompletos)."""
+        if not phone or quota.allows(phone):
+            return True
+        report.deferred.append(tracking)
+        return False
 
     def _deliver(
         self,

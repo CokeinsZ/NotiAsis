@@ -269,7 +269,40 @@ CREATE TABLE IF NOT EXISTS messages_errors (
 	created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
+-- Cupo de clientes nuevos por 24 h (límite de mensajería de Meta, del
+-- número de WhatsApp: lo comparten todos los business). Antes de enviar,
+-- cada corrida del bot reserva los teléfonos a los que va a escribir
+-- (POST /quota/reservations) y los libera al terminar; si no los libera,
+-- vencen en expires_at. Un teléfono reservado ocupa un cupo hasta que su
+-- mensaje queda registrado en messages (desde ahí cuenta por el mensaje).
+CREATE TABLE IF NOT EXISTS message_quota_reservations (
+	id SERIAL PRIMARY KEY,
+	kind VARCHAR(16) NOT NULL,      -- 'office' (prioridad) o 'tracking' (con tope propio)
+	business_id INT,                -- quién reservó (solo auditoría)
+	created_at TIMESTAMP NOT NULL,  -- UTC
+	expires_at TIMESTAMP NOT NULL,  -- UTC
+	released_at TIMESTAMP,          -- UTC; NULL mientras esté vigente
+
+	FOREIGN KEY (business_id) REFERENCES businesses(id)
+		ON DELETE SET NULL
+		ON UPDATE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS message_quota_reservation_phones (
+	reservation_id INT NOT NULL,
+	user_id VARCHAR(20) NOT NULL,   -- teléfono normalizado, como messages.user_id
+
+	PRIMARY KEY (reservation_id, user_id),
+	FOREIGN KEY (reservation_id) REFERENCES message_quota_reservations(id)
+		ON DELETE CASCADE
+);
+
 CREATE INDEX IF NOT EXISTS idx_messages_chat_time ON messages (business_id, user_id, created_at DESC);
+-- Cálculo del cupo: salientes de las últimas 24 h y mensajes del cliente
+-- (abren su ventana de atención de 24 h).
+CREATE INDEX IF NOT EXISTS idx_messages_outgoing_time ON messages (created_at) WHERE NOT from_user;
+CREATE INDEX IF NOT EXISTS idx_messages_incoming_user_time ON messages (user_id, created_at) WHERE from_user;
+CREATE INDEX IF NOT EXISTS idx_quota_reservations_active ON message_quota_reservations (expires_at) WHERE released_at IS NULL;
 -- Autorizar la descarga de multimedia: el media_id debe ser de un mensaje del business.
 CREATE INDEX IF NOT EXISTS idx_messages_media ON messages (media_id) WHERE media_id IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_chats_business_activity ON chats (business_id, last_user_message_timestamp DESC);

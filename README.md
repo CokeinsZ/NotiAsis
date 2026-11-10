@@ -88,7 +88,11 @@ El bot consume la API del backend (`BACKEND_API_URL`):
      respondiendo.
 - **Teléfonos sin indicativo** (Dropi, Google Sheet, PDF): se completan
   con el país del business (`countries.phone_prefix` y `phone_length`,
-  que el bot lee de `GET /businesses/{id}`).
+  que el bot lee de `GET /businesses/{id}`). Un teléfono con otra
+  longitud (mal digitado) queda tal cual. El backend acepta de 8 a 15
+  dígitos en guías, mensajes y asociados; si aun así rechaza una guía
+  (4xx), el bot no la notifica, porque sin la guía registrada la
+  notificación no se puede marcar y se repetiría en cada corrida.
 - **Estados que reporta Meta** (sent/delivered/read):
   `PATCH /messages/{meta_message_id}/status`.
 - **Mensajes que Meta acepta pero no entrega** (webhook con estado
@@ -99,7 +103,9 @@ El bot consume la API del backend (`BACKEND_API_URL`):
   una notificación de guía, la borra de `guide_notifications` y devuelve
   la guía al paso de oficina o nivel de seguimiento anterior. No se
   reintenta en el momento: la próxima corrida del job la vuelve a
-  enviar. Por eso el bot marca cada notificación con el `meta_message_id`
+  enviar. Excepción: el error 131026 (número sin WhatsApp o que no
+  puede recibir) no deshace la notificación, porque reenviarla fallaría
+  en cada corrida. Por eso el bot marca cada notificación con el `meta_message_id`
   de su mensaje principal (`mensaje_guia_es` en la inicial; el video
   solo no la deshace). El aviso de Meta llega entre 1 y 20 segundos
   después del envío y puede ganarle a la marca del bot: un bloqueo por
@@ -336,9 +342,63 @@ Despliegue, en este orden: 1) correr `webapp/backend/db.sql` (agrega
 `meta_message_id` a `guide_notifications`, el estado `failed` a
 `message_status_enum` y la tabla `messages_errors`), 2) desplegar el
 backend y el frontend (el backend anterior no sabe leer mensajes en
-`failed`), 3) desplegar el bot. Si el backend no devuelve `tracking_level`, la
+`failed`), 3) desplegar el bot. Las tablas `message_quota_reservations` y
+`message_quota_reservation_phones` y los índices del cupo también salen de
+`db.sql`; el bot nuevo necesita el backend nuevo (sin `/quota` no envía). Si el backend no devuelve `tracking_level`, la
 corrida no envía nada (registra el error en los logs) para no repetir
 notificaciones.
+
+### Cupo de mensajes (límite de mensajería de Meta)
+
+Meta limita cuántos clientes **únicos** pueden recibir plantillas en una
+**ventana móvil de 24 h** (250 sin verificar el negocio; la cuenta es del
+número de WhatsApp, así que los business la comparten). Los clientes que
+nos escribieron en las últimas 24 h (ventana de atención abierta) no
+consumen cupo. Pasarse da errores como 131048 *Spam Rate limit hit*.
+
+Antes de enviar, cada corrida automática del bot (oficina de Dropi,
+seguimiento de Dropi y Google Sheet) reserva el cupo de sus clientes en
+una sola llamada, en orden de prioridad:
+
+```
+POST /quota/reservations  {"phones": ["573001112233", ...], "kind": "office", "business_id": 1, "ttl_minutes": 60}
+→ {"approved": false, "approved_phones": [...], "denied_phones": [...], "new_clients": 40,
+   "reservation_id": 12, "expires_at": "...", "available": 23, "limit": 230, "tracking_limit": 80,
+   "used": 190, "reserved": 17, "tracking_used": 45, "tracking_reserved": 0}
+DELETE /quota/reservations/12   (al terminar la corrida)
+GET /quota                      (cupo actual, sin reservar)
+```
+
+- El backend clasifica cada teléfono: **ya ocupa cupo** (le escribimos en
+  las últimas 24 h, mensaje no fallido y fuera de su ventana de atención),
+  **ventana abierta** (nos escribió en las últimas 24 h y sigue abierta
+  hasta que vence la reserva), **reservado por otra corrida**, o **nuevo**.
+  Los tres primeros se aprueban siempre; los nuevos, en el orden pedido
+  mientras quepan (la aprobación puede ser parcial).
+- **Oficina tiene prioridad**: puede usar todo el cupo (`MESSAGING_LIMIT`,
+  230 por defecto). El seguimiento además tiene un tope propio dentro del
+  cupo (`MESSAGING_TRACKING_LIMIT`, 80 por defecto): clientes con una
+  notificación de seguimiento en las últimas 24 h. Así el seguimiento de la
+  mañana nunca se gasta el cupo de la notificación de oficina.
+- La reserva guarda los **teléfonos**, no un número: un cliente cuenta una
+  sola vez aunque esté en dos corridas a la vez o ya tenga su mensaje
+  registrado (desde ahí cuenta por el mensaje). Al terminar la corrida se
+  libera; si el bot se cae, vence en `ttl_minutes` (el bot usa 60).
+- Atómico: la situación de todos los teléfonos y los totales salen de una
+  sola consulta, y calcular y reservar pasan en una transacción con un
+  bloqueo global (`pg_advisory_xact_lock`): dos corridas simultáneas nunca
+  ven el mismo cupo libre. Si el bloqueo no se obtiene en 10 s, responde
+  503 y el bot reintenta (3 intentos).
+- En el bot (`RunQuota`, `app/services/quota.py`): cada corrida planea a
+  quién le escribe, reserva, envía solo a los aprobados y libera al final.
+  Los que no caben quedan en `deferred` del reporte ("sin cupo"): no se
+  envían ni se marcan, así que la próxima corrida los reintenta. Sin cupo
+  tampoco se consulta el detalle del pedido a Dropi ni se descarga el PDF.
+  Prioridad dentro de una corrida de oficina: primero los avisos iniciales,
+  después los recordatorios. Si el backend no responde, no se envía.
+- El PDF que manda un asociado por WhatsApp no pide cupo: es un envío
+  manual a un solo cliente y no tiene una corrida que lo reintente (igual
+  cuenta en `used` una vez registrado).
 
 ## Agregar una nueva plantilla de WhatsApp
 
@@ -531,6 +591,9 @@ Solo para el bot (token de api_key; un asociado recibe 403) y la administración
 | POST | `/messages/{meta_message_id}/errors` | `{"error_code", "error_title", "payload"}`: Meta reportó que el mensaje falló. Lo deja en `failed`, guarda el error y deshace la notificación de guía ligada a él (`undone`). Idempotente |
 | POST | `/guides` | Registrar guía; responde `created: false` si es duplicada (no re-notificar). `details` opcional (cliente y productos del pedido) se guarda aunque la guía ya existiera |
 | POST | `/guides/lookup` | `{"numbers": [...]}` (máx. 500) → guías existentes con `notification_count`, `details` y `products` |
+| GET | `/quota` | Cupo de clientes nuevos en 24 h: `limit`, `tracking_limit`, `used`, `reserved`, `tracking_used`, `tracking_reserved`, `available_office`, `available_tracking` |
+| POST | `/quota/reservations` | `{"phones", "kind": "office"\|"tracking", "business_id"?, "ttl_minutes"?}`: aprueba (y reserva) los teléfonos que caben en el cupo (`approved_phones`/`denied_phones`, en el orden pedido). 503 si el cupo está bloqueado por otra reserva |
+| DELETE | `/quota/reservations/{id}` | Liberar la reserva al terminar el envío (`released: false` si ya estaba liberada; 404 si no existe) |
 | POST | `/guides/{number}/notified` | Contar una notificación de oficina. Cuerpo opcional `{"meta_message_id"}`: el mensaje principal (`updated: false` si Meta ya lo reportó como fallido) |
 | POST | `/guides/{number}/tracking` | `{"level": 1\|2, "meta_message_id"}`: nivel de seguimiento del envío notificado. Solo sube (`updated: false` si ya tenía ese nivel o uno mayor, o si el mensaje ya falló); 404 si la guía no existe |
 

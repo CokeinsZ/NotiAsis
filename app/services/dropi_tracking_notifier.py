@@ -18,8 +18,10 @@ from dataclasses import dataclass, field
 from datetime import date
 
 from app.core.phones import PhoneCountry
+from app.models.quota import TRACKING
 from app.models.shipping import RecipientInfo
 from app.services.dropi_orders import DropiOrderNotifier, DropiRunReport
+from app.services.quota import RunQuota
 from app.whatsapp.templates.base import TemplateMessage
 from app.whatsapp.templates.pedido_camino import PedidoCaminoTemplate
 from app.whatsapp.templates.pedido_enviado import PedidoEnviadoTemplate
@@ -75,6 +77,9 @@ class DropiTrackingNotificationService(DropiOrderNotifier):
        notificado y sus datos de pedido guardados.
     3. Envía la plantilla del nivel a las guías que aún no lo tienen
        notificado y sube su nivel en el backend.
+    4. Antes de enviar reserva el cupo de mensajería del seguimiento (tiene
+       un tope propio: oficina tiene prioridad); los que no caben quedan
+       para la próxima corrida.
 
     El detalle del pedido (/orden) solo se pide a Dropi cuando la guía no
     lo tiene guardado (la primera vez que se ve el pedido) y se guarda en
@@ -114,16 +119,26 @@ class DropiTrackingNotificationService(DropiOrderNotifier):
                 # nivel y cada corrida repetiría las notificaciones.
                 report.errors.append("backend: las guías no traen tracking_level (¿falta migrar db.sql?)")
             else:
-                for tracking, (level, order) in orders.items():
-                    self._process_order(business_id, country, order, level, guides.get(tracking), report)
+                plan = [
+                    (order, level, guides.get(tracking))
+                    for tracking, (level, order) in orders.items()
+                    if self._needs_notification(business_id, order, level, guides.get(tracking), report)
+                ]
+                with RunQuota(self._backend, TRACKING, business_id) as quota:
+                    phones = [self._phone(order, guide, "", country) for order, _, guide in plan]
+                    self._reserve_quota(quota, phones, report)
+                    for order, level, guide in plan:
+                        self._process_order(business_id, country, order, level, guide, quota, report)
 
         notified = ", ".join(f"nivel {level}: {report.notified.get(level, 0)}" for level in TRACKING_LEVELS)
         print(
             f"Dropi tracking done for business {business_id}: {notified}, "
             f"{report.already_notified} ya notificados, "
-            f"{len(report.skipped)} omitidos, {len(report.errors)} errores, "
+            f"{len(report.skipped)} omitidos, {len(report.deferred)} sin cupo, {len(report.errors)} errores, "
             f"{report.order_lookups} consulta(s) de pedido en {report.pages} página(s)"
         )
+        if report.deferred:
+            print(f"Dropi tracking: sin cupo de mensajería (próxima corrida): {', '.join(report.deferred)}")
         if report.errors:
             print(f"Dropi tracking: errores: {', '.join(report.errors)}")
         return report
@@ -159,6 +174,22 @@ class DropiTrackingNotificationService(DropiOrderNotifier):
                         found[tracking] = (level, order)
         return found
 
+    def _needs_notification(
+        self, business_id: int, order: dict, level: int, guide: dict | None, report: DropiTrackingReport
+    ) -> bool:
+        tracking = self._tracking(order)
+        if guide and guide.get("business_id") != business_id:
+            # La guía ya está en los chats de otro business: notificarla
+            # aquí mezclaría su historial con el de este.
+            print(f"Dropi guide {tracking}: belongs to business {guide.get('business_id')}, skipping")
+            report.skipped.append(tracking)
+            return False
+
+        if level <= self._notified_level(guide):
+            report.already_notified += 1
+            return False
+        return True
+
     def _process_order(
         self,
         business_id: int,
@@ -166,22 +197,12 @@ class DropiTrackingNotificationService(DropiOrderNotifier):
         order: dict,
         level: int,
         guide: dict | None,
+        quota: RunQuota,
         report: DropiTrackingReport,
     ) -> None:
         tracking = self._tracking(order)
-        if guide and guide.get("business_id") != business_id:
-            # La guía ya está en los chats de otro business: notificarla
-            # aquí mezclaría su historial con el de este.
-            print(f"Dropi guide {tracking}: belongs to business {guide.get('business_id')}, skipping")
-            report.skipped.append(tracking)
-            return
-
-        if level <= self._notified_level(guide):
-            report.already_notified += 1
-            return
-
         try:
-            self._notify(business_id, country, order, level, guide, report)
+            self._notify(business_id, country, order, level, guide, quota, report)
         except Exception as e:
             print(f"Error processing Dropi guide {tracking}: {e}")
             report.errors.append(tracking)
@@ -204,13 +225,18 @@ class DropiTrackingNotificationService(DropiOrderNotifier):
         order: dict,
         level: int,
         guide: dict | None,
+        quota: RunQuota,
         report: DropiTrackingReport,
     ) -> None:
         """Envía la plantilla del nivel. Si la guía no tiene guardados los
         datos del pedido se consultan a Dropi una única vez y se guardan
         (también los usa /notify-dropi-mcp cuando el pedido llegue a la
-        oficina)."""
+        oficina). Sin cupo de mensajería no se hace nada (ni se consulta a
+        Dropi)."""
         tracking = self._tracking(order)
+        if not self._within_quota(quota, self._phone(order, guide, "", country), tracking, report):
+            return
+
         details = self._stored_details(guide)
         detail_phone = ""
 
@@ -223,6 +249,8 @@ class DropiTrackingNotificationService(DropiOrderNotifier):
             details, detail_phone = result
 
         phone = self._phone(order, guide, detail_phone, country)
+        if not self._within_quota(quota, phone, tracking, report):
+            return
         recipient = self._build_recipient(order, details, phone, self._address_with_city(order, details))
         template = self._template(level, recipient, order, details)
         if template is None:
@@ -235,7 +263,8 @@ class DropiTrackingNotificationService(DropiOrderNotifier):
                 tracking, recipient.phone, recipient.name, business_id, details=details
             )
             if guide is None and not created:
-                # Carrera rara: otra corrida la registró entre la consulta y ahora.
+                # Carrera rara (otra corrida la registró entre la consulta y ahora)
+                # o el backend la rechazó o no respondió: no se notifica.
                 report.skipped.append(tracking)
                 return
 

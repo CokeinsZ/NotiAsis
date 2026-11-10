@@ -12,6 +12,7 @@ from datetime import date
 from typing import TYPE_CHECKING
 
 from app.core.phones import PhoneCountry
+from app.models.quota import QuotaReservation
 from app.models.shipping import RecipientInfo
 
 if TYPE_CHECKING:
@@ -143,8 +144,11 @@ class NotificationBackend(ABC):
         `details` son los datos del pedido (cliente y productos); el
         backend los guarda aunque la guía ya existiera.
 
-        Retorna True si la guía es nueva (hay que notificar) o si el
-        backend no responde (fail-open); False si ya fue registrada.
+        Retorna True si la guía es nueva (hay que notificar); False si ya
+        fue registrada, si el backend la rechaza por datos inválidos o si no
+        responde. En los dos últimos casos no se notifica: sin la guía
+        registrada la notificación no se puede marcar y se repetiría en cada
+        corrida (mejor perderla que notificar duplicado).
         """
 
     @abstractmethod
@@ -239,3 +243,18 @@ class NotificationBackend(ABC):
         El backend guarda el error con el estado completo (`payload`), deja
         el mensaje en 'failed' y deshace la notificación de guía ligada a
         él. No se reintenta aquí: lo hace la próxima corrida del job."""
+
+    @abstractmethod
+    def reserve_quota(
+        self, phones: list[str], kind: str, business_id: int, ttl_minutes: int
+    ) -> QuotaReservation | None:
+        """Pide cupo de mensajería (clientes nuevos en 24 h, límite de Meta)
+        para los teléfonos de una corrida, en orden de prioridad. El backend
+        aprueba los que no consumen cupo y los nuevos que quepan, y deja
+        reservados los aprobados por `ttl_minutes`. None si el backend no
+        responde: entonces no se envía (pasarse del límite hace que Meta
+        rechace los mensajes)."""
+
+    @abstractmethod
+    def release_quota(self, reservation_id: int) -> None:
+        """Libera la reserva de cupo al terminar la corrida."""

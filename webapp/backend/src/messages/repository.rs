@@ -4,7 +4,7 @@ use chrono::NaiveDateTime;
 use crate::messages::dtos::{
     MediaType, Message, MessageFailure, MessageStatus, RegisterMessageErrorDto, UndoneNotification,
 };
-use crate::tools::message_lock::lock_message;
+use crate::tools::message_lock::{is_permanent_error, lock_message};
 
 /// Nivel de seguimiento tras borrar una notificación fallida: el más alto
 /// que sí se notificó (0 si ninguno). El job lo vuelve a notificar.
@@ -64,7 +64,8 @@ pub trait MessageRepositoryTrait: Send + Sync {
     /// Registra el error que Meta reportó de un mensaje: lo guarda en
     /// messages_errors, deja el mensaje en 'failed' y deshace la
     /// notificación de guía ligada a él (la guía vuelve al paso o nivel
-    /// anterior y se reintenta en la próxima corrida del job). Idempotente.
+    /// anterior y se reintenta en la próxima corrida del job), salvo con un
+    /// error permanente (`PERMANENT_ERROR_CODES`). Idempotente.
     async fn register_failure(
         &self,
         meta_message_id: &str,
@@ -217,7 +218,13 @@ impl MessageRepositoryTrait for PostgresMessageRepository {
 
         // Si el bot ya marcó la notificación de la guía con este mensaje,
         // se borra (no se entregó: no cuenta en el dashboard) y la guía
-        // vuelve al paso o nivel anterior.
+        // vuelve al paso o nivel anterior. Con un error permanente (número
+        // sin WhatsApp) se deja: reenviarla fallaría en cada corrida.
+        if is_permanent_error(error.error_code) {
+            tx.commit().await.map_err(|e| e.to_string())?;
+            return Ok(MessageFailure { message_found, undone: Vec::new() });
+        }
+
         let undone: Vec<UndoneNotification> = sqlx::query_as(
             r#"
             DELETE FROM guide_notifications

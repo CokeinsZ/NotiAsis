@@ -1,14 +1,9 @@
 use chrono::NaiveDateTime;
-use once_cell::sync::Lazy;
-use regex::Regex;
 use serde::{Deserialize, Serialize};
 use validator::Validate;
 
 use crate::tools::custom_validators::validate_non_blank;
-
-static PHONE_REGEX: Lazy<Regex> = Lazy::new(|| {
-    Regex::new(r"^\+?\d{10,15}$").unwrap()
-});
+use crate::tools::phones::PHONE_REGEX;
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[derive(sqlx::FromRow)]
@@ -31,7 +26,7 @@ pub struct RegisterGuideDto {
     #[validate(custom(function = "validate_non_blank"), length(min = 1, max = 20, message = "El número de guía debe tener entre 1 y 20 caracteres"))]
     pub number: String,
 
-    #[validate(regex(path = *PHONE_REGEX, message = "El teléfono debe tener entre 10 y 15 dígitos, con '+' opcional"))]
+    #[validate(regex(path = *PHONE_REGEX, message = "El teléfono debe tener entre 8 y 15 dígitos, con '+' opcional"))]
     pub user_phone: String,
 
     #[validate(length(max = 255))]
@@ -217,6 +212,26 @@ mod tests {
         invalid_phone.user_phone = "573003579384".into();
         invalid_phone.business_id = 0;
         assert!(invalid_phone.validate().is_err());
+    }
+
+    #[test]
+    fn guide_phone_accepts_8_to_15_digits() {
+        // Un teléfono mal digitado en Dropi (9 dígitos, sin indicativo) se
+        // acepta: si se rechazara, la guía no quedaría registrada y la misma
+        // notificación se enviaría en cada corrida.
+        let with_phone = |phone: &str| RegisterGuideDto {
+            number: "FD45379197".into(),
+            user_phone: phone.into(),
+            user_name: None,
+            business_id: 2,
+            details: None,
+        };
+        for phone in ["51319585", "488760023", "50251319585", "+573003579384", "123456789012345"] {
+            assert!(with_phone(phone).validate().is_ok(), "{phone}");
+        }
+        for phone in ["1234567", "1234567890123456", "50251-319585"] {
+            assert!(with_phone(phone).validate().is_err(), "{phone}");
+        }
     }
 
     #[test]

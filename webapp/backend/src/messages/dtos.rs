@@ -1,14 +1,9 @@
 use chrono::NaiveDateTime;
-use once_cell::sync::Lazy;
-use regex::Regex;
 use serde::{Deserialize, Serialize};
 use validator::Validate;
 
 use crate::tools::custom_validators::validate_non_blank;
-
-static PHONE_REGEX: Lazy<Regex> = Lazy::new(|| {
-    Regex::new(r"^\+?\d{10,15}$").unwrap()
-});
+use crate::tools::phones::PHONE_REGEX;
 
 #[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
@@ -64,7 +59,7 @@ pub struct SendMessageDto {
 /// Mensaje entrante reportado por el bot (webhook de Meta).
 #[derive(Debug, Serialize, Deserialize, Validate)]
 pub struct IncomingMessageDto {
-    #[validate(regex(path = *PHONE_REGEX, message = "El teléfono debe tener entre 10 y 15 dígitos, con '+' opcional"))]
+    #[validate(regex(path = *PHONE_REGEX, message = "El teléfono debe tener entre 8 y 15 dígitos, con '+' opcional"))]
     pub user_phone: String,
 
     #[validate(length(max = 255))]
@@ -97,7 +92,7 @@ pub struct IncomingMessageDto {
 pub struct OutgoingMessageDto {
     pub business_id: i32,
 
-    #[validate(regex(path = *PHONE_REGEX, message = "El teléfono debe tener entre 10 y 15 dígitos, con '+' opcional"))]
+    #[validate(regex(path = *PHONE_REGEX, message = "El teléfono debe tener entre 8 y 15 dígitos, con '+' opcional"))]
     pub user_phone: String,
 
     #[validate(length(max = 255))]

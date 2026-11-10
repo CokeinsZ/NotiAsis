@@ -6,7 +6,7 @@ use chrono::NaiveDateTime;
 use crate::guides::dtos::{
     DailyNotificationStat, Guide, GuideDetails, GuideDetailsDto, GuideProduct, GuideWithDetails,
 };
-use crate::tools::message_lock::{lock_message, message_failed};
+use crate::tools::message_lock::{lock_message, retryable_failure};
 
 #[async_trait]
 pub trait GuideRepositoryTrait: Send + Sync {
@@ -57,7 +57,9 @@ pub struct PostgresGuideRepository {
 
 /// Con el mensaje de la notificación, toma su bloqueo y dice si se puede
 /// registrar: false si Meta ya reportó que falló (el webhook del error
-/// llegó antes que la marca del bot). Sin mensaje no hay nada que revisar.
+/// llegó antes que la marca del bot), salvo con un error permanente (se
+/// cuenta como hecha, como en `register_failure`). Sin mensaje no hay nada
+/// que revisar.
 async fn message_can_notify(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     meta_message_id: Option<&str>,
@@ -66,7 +68,7 @@ async fn message_can_notify(
         return Ok(true);
     };
     lock_message(tx, meta_message_id).await?;
-    Ok(!message_failed(tx, meta_message_id).await?)
+    Ok(!retryable_failure(tx, meta_message_id).await?)
 }
 
 impl PostgresGuideRepository {
