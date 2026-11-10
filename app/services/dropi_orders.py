@@ -17,11 +17,12 @@ import unicodedata
 from dataclasses import dataclass, field
 from datetime import date
 
-from app.core.interfaces import DropiOrderSource, MessageSender, NotificationBackend
+from app.core.interfaces import DropiOrderSource, MessageSender, NotificationBackend, ProductVideoSource
 from app.core.phones import PhoneCountry, to_international
 from app.models.shipping import RecipientInfo
 from app.services.quota import RunQuota
 from app.whatsapp.templates.base import TemplateMessage
+from app.whatsapp.templates.video_producto import VideoProductoTemplate
 
 # Pedido ya pagado: la transportadora no cobra nada al entregarlo.
 PREPAID_RATE_TYPE = "SIN RECAUDO"
@@ -68,12 +69,14 @@ class DropiOrderNotifier:
         order_source: DropiOrderSource,
         backend: NotificationBackend,
         message_sender: MessageSender,
+        product_videos: ProductVideoSource,
         debug_notification_number: str | None = None,
         notification_override_number: str | None = None,
     ) -> None:
         self._order_source = order_source
         self._backend = backend
         self._message_sender = message_sender
+        self._product_videos = product_videos
         self._debug_notification_number = debug_notification_number
         self._notification_override_number = notification_override_number
 
@@ -229,6 +232,31 @@ class DropiOrderNotifier:
         return to_international(phone, country)
 
     # ---------------- Envío ----------------
+
+    # ---------------- Video del producto ----------------
+
+    @staticmethod
+    def _video_already_sent(guide: dict | None) -> bool:
+        """El video del producto va una sola vez por guía: en el nivel 1 del
+        seguimiento o, si no lo recibió ahí, en el aviso inicial en oficina.
+        `video_sent` lo calcula el backend (un video saliente de la guía que
+        no falló: si falló, se vuelve a enviar)."""
+        return bool(guide and guide.get("video_sent"))
+
+    def _product_video(self, business_id: int, guide: dict | None, details: dict) -> tuple[str, str] | None:
+        """(media_id, archivo) del video a enviar, o None si el producto no
+        tiene video o la guía ya lo recibió."""
+        if self._video_already_sent(guide):
+            return None
+        return self._product_videos.video_for(business_id, details.get("products") or [])
+
+    def _video_was_sent(self, video: tuple[str, str] | None, sent_names: set[str]) -> bool:
+        """Si el video salió. Si Meta lo rechazó al enviarlo (p. ej. el
+        media_id se borró antes de vencer), se olvida para volver a subirlo."""
+        video_sent = VideoProductoTemplate.TEMPLATE_NAME in sent_names
+        if video and not video_sent:
+            self._product_videos.discard(video[0])
+        return video_sent
 
     # ---------------- Cupo de mensajería ----------------
 

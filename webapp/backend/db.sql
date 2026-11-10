@@ -305,6 +305,8 @@ CREATE INDEX IF NOT EXISTS idx_messages_incoming_user_time ON messages (user_id,
 CREATE INDEX IF NOT EXISTS idx_quota_reservations_active ON message_quota_reservations (expires_at) WHERE released_at IS NULL;
 -- Autorizar la descarga de multimedia: el media_id debe ser de un mensaje del business.
 CREATE INDEX IF NOT EXISTS idx_messages_media ON messages (media_id) WHERE media_id IS NOT NULL;
+-- Si la guía ya recibió el video del producto (POST /guides/lookup, video_sent).
+CREATE INDEX IF NOT EXISTS idx_messages_guide ON messages (guide_number) WHERE guide_number IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_chats_business_activity ON chats (business_id, last_user_message_timestamp DESC);
 CREATE INDEX IF NOT EXISTS idx_guide_notifications_business_date ON guide_notifications (business_id, (created_at::date));
 CREATE INDEX IF NOT EXISTS idx_guide_notifications_guide ON guide_notifications (guide_number);

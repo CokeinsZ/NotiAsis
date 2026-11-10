@@ -75,26 +75,36 @@ def _dropi_order_source(settings: Settings) -> N8nDropiClient:
 
 
 @lru_cache
+def get_product_videos() -> ProductVideoLibrary:
+    """Una sola biblioteca de videos para /notify-dropi-mcp y
+    /notify-dropi-tracking: su lock y su caché de media_ids son por
+    instancia, y con dos las corridas simultáneas subirían el mismo video
+    dos veces y se pisarían el archivo de caché."""
+    settings = get_settings()
+    return ProductVideoLibrary(
+        media_dir=settings.media_dir,
+        # Timeout amplio: subir un video (hasta 16 MB) tarda más que un envío.
+        uploader=WhatsAppClient(
+            access_token=settings.whatsapp_token,
+            phone_number_id=settings.whatsapp_phone_id,
+            timeout=120,
+        ),
+        cache_path=settings.media_cache_path,
+        namespace=settings.whatsapp_phone_id,
+    )
+
+
+@lru_cache
 def get_dropi_notifier() -> DropiNotificationService:
     settings = get_settings()
-    order_source = _dropi_order_source(settings)
-
-    # Timeout amplio: subir un video (hasta 16 MB) tarda más que un envío.
-    whatsapp_client = WhatsAppClient(
-        access_token=settings.whatsapp_token,
-        phone_number_id=settings.whatsapp_phone_id,
-        timeout=120,
-    )
     return DropiNotificationService(
-        order_source=order_source,
+        order_source=_dropi_order_source(settings),
         backend=get_backend_client(),
-        message_sender=whatsapp_client,
-        product_videos=ProductVideoLibrary(
-            media_dir=settings.media_dir,
-            uploader=whatsapp_client,
-            cache_path=settings.media_cache_path,
-            namespace=settings.whatsapp_phone_id,
+        message_sender=WhatsAppClient(
+            access_token=settings.whatsapp_token,
+            phone_number_id=settings.whatsapp_phone_id,
         ),
+        product_videos=get_product_videos(),
         debug_notification_number=settings.debug_notification_number,
         notification_override_number=settings.notification_override_number,
     )
@@ -116,6 +126,7 @@ def get_dropi_tracking_notifier() -> DropiTrackingNotificationService:
             access_token=settings.whatsapp_token,
             phone_number_id=settings.whatsapp_phone_id,
         ),
+        product_videos=get_product_videos(),
         debug_notification_number=settings.debug_notification_number,
         notification_override_number=settings.notification_override_number,
     )

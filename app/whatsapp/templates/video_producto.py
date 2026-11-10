@@ -3,7 +3,9 @@ from app.whatsapp.templates.base import TemplateMessage
 
 class VideoProductoTemplate(TemplateMessage):
     """Plantilla con el video del producto en el header (sin variables
-    de texto). Se envía antes de pedido_oficina en la primera notificación.
+    de texto). Va una sola vez por guía: antes de pedido_enviado_1 (nivel 1
+    del seguimiento) o, si no la recibió ahí, antes del mensaje_guia en el
+    aviso inicial en oficina.
     """
 
     TEMPLATE_NAME = "video_producto"  # Nombre registrado en Meta Business

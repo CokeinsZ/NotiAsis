@@ -1007,3 +1007,32 @@ def test_without_quota_service_nothing_is_sent():
     assert sender.sent == []
     assert report.deferred == ["G1"]
     assert "backend: no se pudo reservar cupo de mensajería" in report.errors
+
+
+def test_initial_office_notification_skips_the_video_already_sent_in_tracking():
+    # La guía recibió el video en el nivel 1 del seguimiento.
+    source = FakeDropiSource([office_order("1", "G1")])
+    stored = stored_guide("G1", 0)
+    stored["video_sent"] = True
+    videos = FakeVideos()
+    service, backend, sender = build_service(source, FakeBackend({"G1": stored}), videos=videos)
+
+    report = service.notify_office_orders(BUSINESS_ID, FROM, UNTIL)
+
+    assert sent_names(sender) == ["mensaje_guia_es"]
+    assert videos.calls == []
+    assert report.new_notifications == 1
+    assert report.videos == 0
+    assert report.without_video == []  # no le faltó: ya lo tenía
+    assert backend.notified == ["G1"]
+
+
+def test_initial_office_notification_sends_the_video_if_tracking_did_not():
+    source = FakeDropiSource([office_order("1", "G1")])
+    stored = stored_guide("G1", 0)
+    stored["video_sent"] = False
+    service, backend, sender = build_service(source, FakeBackend({"G1": stored}))
+
+    service.notify_office_orders(BUSINESS_ID, FROM, UNTIL)
+
+    assert sent_names(sender) == ["video_producto", "mensaje_guia_es"]

@@ -178,8 +178,9 @@ def order_detail(order_id, tracking, address="Cra 5 # 10-20 Barrio Centro", prod
 
 
 def guide(number, user_id="573105409038", tracking_level=0, count=0, business_id=BUSINESS_ID,
-          details=None, products=None):
+          details=None, products=None, video_sent=False):
     return {
+        "video_sent": video_sent,
         "number": number,
         "user_id": user_id,
         "business_id": business_id,
@@ -200,13 +201,30 @@ def stored_guide(number, tracking_level=0, count=0, **kwargs):
     return guide(number, tracking_level=tracking_level, count=count, details=details, products=products, **kwargs)
 
 
-def build_service(source, backend=None, sender=None, override=None, debug=None):
+class FakeVideos:
+    """Videos de producto. Por defecto ningún producto tiene video."""
+
+    def __init__(self, media_id=None):
+        self.media_id = media_id
+        self.calls = []
+        self.discarded = []
+
+    def video_for(self, business_id, products):
+        self.calls.append((business_id, [p["product_name"] for p in products]))
+        return (self.media_id, "CAYENNE.mp4") if self.media_id else None
+
+    def discard(self, media_id):
+        self.discarded.append(media_id)
+
+
+def build_service(source, backend=None, sender=None, override=None, debug=None, videos=None):
     backend = backend or FakeBackend()
     sender = sender or FakeSender()
     service = DropiTrackingNotificationService(
         order_source=source,
         backend=backend,
         message_sender=sender,
+        product_videos=videos or FakeVideos(),
         debug_notification_number=debug,
         notification_override_number=override,
     )
@@ -822,3 +840,78 @@ def test_tracking_without_quota_service_sends_nothing():
     assert sender.sent == []
     assert backend.tracking_marks == []
     assert "backend: no se pudo reservar cupo de mensajería" in report.errors
+
+
+# ------------------------------ Video del producto ------------------------------
+
+
+def test_level_1_sends_the_product_video_before_pedido_enviado():
+    source = FakeDropiSource({LEVEL_1_STATUS: [order("1", "G1")]}, details={"1": order_detail("1", "G1")})
+    videos = FakeVideos(media_id="media-cayenne")
+    service, backend, sender = build_service(source, videos=videos)
+
+    report = run(service)
+
+    assert sent_names(sender) == ["video_producto", "pedido_enviado_1"]
+    assert videos.calls == [(BUSINESS_ID, ["CAYENNE PEPPER. CM"])]
+    assert report.notified == {1: 1}
+    assert report.videos == 1
+    # El nivel queda ligado a pedido_enviado_1, no al video.
+    assert backend.tracking_messages == ["wamid.tracking.2"]
+    assert [(m["media_type"], m["media_id"]) for m in backend.outgoing] == [("video", "media-cayenne"), ("text", None)]
+
+
+def test_level_2_does_not_send_the_video():
+    source = FakeDropiSource({LEVEL_2_STATUS: [order("1", "G1", status=LEVEL_2_STATUS)]})
+    backend = FakeBackend({"G1": stored_guide("G1")})
+    videos = FakeVideos(media_id="media-cayenne")
+    service, backend, sender = build_service(source, backend, videos=videos)
+
+    run(service)
+
+    assert sent_names(sender) == ["pedido_camino_1"]
+    assert videos.calls == []
+
+
+def test_video_is_not_repeated_when_level_1_is_retried():
+    # El video salió pero pedido_enviado_1 falló: el reintento no repite el video.
+    source = FakeDropiSource({LEVEL_1_STATUS: [order("1", "G1")]})
+    backend = FakeBackend({"G1": stored_guide("G1", video_sent=True)})
+    videos = FakeVideos(media_id="media-cayenne")
+    service, backend, sender = build_service(source, backend, videos=videos)
+
+    report = run(service)
+
+    assert sent_names(sender) == ["pedido_enviado_1"]
+    assert videos.calls == []
+    assert report.videos == 0
+
+
+def test_rejected_video_is_forgotten_and_level_1_still_goes_out():
+    source = FakeDropiSource({LEVEL_1_STATUS: [order("1", "G1")]}, details={"1": order_detail("1", "G1")})
+    videos = FakeVideos(media_id="media-vencido")
+    sender = FakeSender()
+    original_send = sender.send_template
+    sender.send_template = lambda to, template: None if template.name == "video_producto" else original_send(to, template)
+    service, backend, _ = build_service(source, sender=sender, videos=videos)
+
+    report = run(service)
+
+    assert videos.discarded == ["media-vencido"]
+    assert report.notified == {1: 1}
+    assert report.videos == 0
+    assert backend.tracking_marks == [("G1", 1)]
+
+
+def test_failed_pedido_enviado_does_not_raise_the_level_even_if_the_video_went_out():
+    source = FakeDropiSource({LEVEL_1_STATUS: [order("1", "G1")]}, details={"1": order_detail("1", "G1")})
+    sender = FakeSender()
+    original_send = sender.send_template
+    sender.send_template = lambda to, template: None if template.name == "pedido_enviado_1" else original_send(to, template)
+    service, backend, _ = build_service(source, sender=sender, videos=FakeVideos(media_id="media-cayenne"))
+
+    report = run(service)
+
+    assert report.errors == ["G1"]
+    assert backend.tracking_marks == []
+    assert [m["media_type"] for m in backend.outgoing] == ["video"]  # el video sí queda en el historial

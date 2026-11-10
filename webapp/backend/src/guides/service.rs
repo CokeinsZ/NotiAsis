@@ -272,6 +272,7 @@ mod tests {
                     guide: g.clone(),
                     details: GuideDetails::default(),
                     products: Vec::new(),
+                    video_sent: false,
                 })
                 .collect())
         }

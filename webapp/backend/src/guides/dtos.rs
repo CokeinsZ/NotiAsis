@@ -158,6 +158,9 @@ pub struct GuideWithDetails {
     pub guide: Guide,
     pub details: GuideDetails,
     pub products: Vec<GuideProduct>,
+    /// Ya se le envió el video del producto (un mensaje saliente de video
+    /// ligado a la guía que no falló): el video va una sola vez por guía.
+    pub video_sent: bool,
 }
 
 #[derive(Debug, Serialize, Deserialize)]

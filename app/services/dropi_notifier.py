@@ -1,7 +1,6 @@
 from dataclasses import dataclass, field
 from datetime import date
 
-from app.core.interfaces import DropiOrderSource, MessageSender, NotificationBackend, ProductVideoSource
 from app.core.phones import PhoneCountry
 from app.models.quota import OFFICE
 from app.models.shipping import RecipientInfo
@@ -64,7 +63,8 @@ class DropiNotificationService(DropiOrderNotifier):
        cuántas veces se notificaron y qué datos de pedido tienen guardados.
     3. Una notificación por guía por día, sin tope: el pedido deja de
        notificarse cuando sale de la oficina (ya no aparece en /ordenes).
-       - Día 1: video_producto (si el producto tiene video) + mensaje_guia.
+       - Día 1: video_producto (si el producto tiene video y la guía no lo
+         recibió antes en el seguimiento) + mensaje_guia.
        - Día 2: recordatorio.
        - Día 3: recordatorio_final.
        - Día 4 en adelante: pedido_oficina.
@@ -76,24 +76,6 @@ class DropiNotificationService(DropiOrderNotifier):
     datos que la plantilla necesita (en la práctica, la primera
     notificación) y se guarda en el backend para los días siguientes.
     """
-
-    def __init__(
-        self,
-        order_source: DropiOrderSource,
-        backend: NotificationBackend,
-        message_sender: MessageSender,
-        product_videos: ProductVideoSource,
-        debug_notification_number: str | None = None,
-        notification_override_number: str | None = None,
-    ) -> None:
-        super().__init__(
-            order_source=order_source,
-            backend=backend,
-            message_sender=message_sender,
-            debug_notification_number=debug_notification_number,
-            notification_override_number=notification_override_number,
-        )
-        self._product_videos = product_videos
 
     def notify_office_orders(
         self,
@@ -266,7 +248,7 @@ class DropiNotificationService(DropiOrderNotifier):
 
         video = None
         if step is NotificationStep.INITIAL:
-            video = self._product_videos.video_for(business_id, details.get("products") or [])
+            video = self._product_video(business_id, guide, details)
         templates = self._templates(step, recipient, amount, video)
 
         sent = self._deliver(recipient, templates)
@@ -274,11 +256,7 @@ class DropiNotificationService(DropiOrderNotifier):
         sent_ids = {template.name: meta_message_id for template, meta_message_id in sent}
         sent_names = set(sent_ids)
 
-        video_sent = VideoProductoTemplate.TEMPLATE_NAME in sent_names
-        if video and not video_sent:
-            # Meta rechazó el media_id (p. ej. se borró antes de vencer):
-            # se vuelve a subir en la próxima primera notificación.
-            self._product_videos.discard(video[0])
+        video_sent = self._video_was_sent(video, sent_names)
 
         # La notificación del día es la última plantilla: sin ella la guía
         # no cuenta como notificada y se reintenta en la próxima corrida.
@@ -299,7 +277,7 @@ class DropiNotificationService(DropiOrderNotifier):
             report.new_notifications += 1
             if video_sent:
                 report.videos += 1
-            else:
+            elif not self._video_already_sent(guide):
                 report.without_video.append(tracking)
 
     @staticmethod

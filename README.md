@@ -221,7 +221,7 @@ consultas a `/orden`) se imprime en los logs del bot al terminar.
 
    | Notificación (`notification_count` actual) | Se envía |
    |---|---|
-   | Día 1 (0) | `video_producto` (si el producto tiene video) + `mensaje_guia_es` |
+   | Día 1 (0) | `video_producto` (si el producto tiene video y la guía no lo recibió en el seguimiento) + `mensaje_guia_es` |
    | Día 2 (1) | `recordatorio` |
    | Día 3 (2) | `recordatorio_final` |
    | Día 4 en adelante (3 o más) | `pedido_oficina` |
@@ -300,9 +300,17 @@ curl -X POST "localhost:8000/notify-dropi-tracking?business_id=1"
 
 | Nivel | Estados de Dropi | Plantilla |
 |---|---|---|
-| 1 | `GUIA_GENERADA`, `PREPARADO PARA TRANSPORTADORA`, `ENTREGADO A TRANSPORTADORA`, `ADMITIDA`, `RECOLECTADO` | `pedido_enviado_1` (nombre, guía, producto, valor a pagar, transportadora) |
+| 1 | `GUIA_GENERADA`, `PREPARADO PARA TRANSPORTADORA`, `ENTREGADO A TRANSPORTADORA`, `ADMITIDA`, `RECOLECTADO` | `video_producto` (si el producto tiene video) + `pedido_enviado_1` (nombre, guía, producto, valor a pagar, transportadora) |
 | 2 | `EN TRANSPORTE`, `EN REPARTO`, `DESPACHADA`, `EN DESPACHO`, `EN RUTA` | `pedido_camino_1` (nombre, producto, guía, dirección y ciudad de entrega) |
 | 3 | `RECLAME EN OFICINA` | lo maneja `/notify-dropi-mcp` |
+
+El video del producto va **una sola vez por guía**: con `pedido_enviado_1`
+en el nivel 1 o, si la guía no pasó por ese nivel, con el aviso inicial en
+oficina. El backend lo sabe por el historial (`video_sent` en
+`/guides/lookup`: un video saliente de la guía que no falló; si Meta lo
+rechazó, se vuelve a enviar). Un video rechazado no deshace el nivel: este
+va ligado a `pedido_enviado_1`. Los dos endpoints comparten la misma
+biblioteca de videos (un solo caché de `media_id`).
 
 Los estados viven en `TRACKING_LEVELS`
 (`app/services/dropi_tracking_notifier.py`) y se escriben exactamente como
@@ -590,7 +598,7 @@ Solo para el bot (token de api_key; un asociado recibe 403) y la administración
 | PATCH | `/messages/{meta_message_id}/status` | Actualizar estado (`sent`/`delivered`/`read`; nunca cambia un `failed`) |
 | POST | `/messages/{meta_message_id}/errors` | `{"error_code", "error_title", "payload"}`: Meta reportó que el mensaje falló. Lo deja en `failed`, guarda el error y deshace la notificación de guía ligada a él (`undone`). Idempotente |
 | POST | `/guides` | Registrar guía; responde `created: false` si es duplicada (no re-notificar). `details` opcional (cliente y productos del pedido) se guarda aunque la guía ya existiera |
-| POST | `/guides/lookup` | `{"numbers": [...]}` (máx. 500) → guías existentes con `notification_count`, `details` y `products` |
+| POST | `/guides/lookup` | `{"numbers": [...]}` (máx. 500) → guías existentes con `notification_count`, `details`, `products` y `video_sent` (ya recibió el video del producto) |
 | GET | `/quota` | Cupo de clientes nuevos en 24 h: `limit`, `tracking_limit`, `used`, `reserved`, `tracking_used`, `tracking_reserved`, `available_office`, `available_tracking` |
 | POST | `/quota/reservations` | `{"phones", "kind": "office"\|"tracking", "business_id"?, "ttl_minutes"?}`: aprueba (y reserva) los teléfonos que caben en el cupo (`approved_phones`/`denied_phones`, en el orden pedido). 503 si el cupo está bloqueado por otra reserva |
 | DELETE | `/quota/reservations/{id}` | Liberar la reserva al terminar el envío (`released: false` si ya estaba liberada; 404 si no existe) |

@@ -1,11 +1,14 @@
 """Seguimiento del envío de los pedidos de Dropi por niveles
 (POST /notify-dropi-tracking, llamado por un job cada 15 minutos).
 
-| Nivel | Estados de Dropi                       | Se envía                     |
-|-------|----------------------------------------|------------------------------|
-| 1     | TRACKING_LEVELS[1] (listo para envío)  | pedido_enviado_1             |
-| 2     | TRACKING_LEVELS[2] (en camino)         | pedido_camino_1              |
-| 3     | RECLAME EN OFICINA                     | lo maneja /notify-dropi-mcp  |
+| Nivel | Estados de Dropi                       | Se envía                                  |
+|-------|----------------------------------------|-------------------------------------------|
+| 1     | TRACKING_LEVELS[1] (listo para envío)  | video_producto (si hay) + pedido_enviado_1 |
+| 2     | TRACKING_LEVELS[2] (en camino)         | pedido_camino_1                           |
+| 3     | RECLAME EN OFICINA                     | lo maneja /notify-dropi-mcp               |
+
+El video del producto va una sola vez por guía: si la guía lo recibe en el
+nivel 1, el aviso inicial en oficina (/notify-dropi-mcp) ya no lo envía.
 
 Cada guía recibe una sola notificación por nivel y los niveles nunca
 retroceden: el backend guarda el nivel más alto notificado
@@ -25,6 +28,7 @@ from app.services.quota import RunQuota
 from app.whatsapp.templates.base import TemplateMessage
 from app.whatsapp.templates.pedido_camino import PedidoCaminoTemplate
 from app.whatsapp.templates.pedido_enviado import PedidoEnviadoTemplate
+from app.whatsapp.templates.video_producto import VideoProductoTemplate
 
 # Estados de Dropi de cada nivel, escritos exactamente como en Dropi:
 # /ordenes filtra por un solo estado y distingue mayúsculas, guiones y
@@ -65,6 +69,8 @@ class DropiTrackingReport(DropiRunReport):
     notified: dict[int, int] = field(default_factory=dict)
     # Pedidos cuyo nivel ya estaba notificado (lo normal entre corridas).
     already_notified: int = 0
+    # Videos de producto enviados (nivel 1).
+    videos: int = 0
 
 
 class DropiTrackingNotificationService(DropiOrderNotifier):
@@ -132,7 +138,7 @@ class DropiTrackingNotificationService(DropiOrderNotifier):
 
         notified = ", ".join(f"nivel {level}: {report.notified.get(level, 0)}" for level in TRACKING_LEVELS)
         print(
-            f"Dropi tracking done for business {business_id}: {notified}, "
+            f"Dropi tracking done for business {business_id}: {notified} ({report.videos} con video), "
             f"{report.already_notified} ya notificados, "
             f"{len(report.skipped)} omitidos, {len(report.deferred)} sin cupo, {len(report.errors)} errores, "
             f"{report.order_lookups} consulta(s) de pedido en {report.pages} página(s)"
@@ -268,16 +274,25 @@ class DropiTrackingNotificationService(DropiOrderNotifier):
                 report.skipped.append(tracking)
                 return
 
-        sent = self._deliver(recipient, [template])
+        # En el nivel 1 va antes el video del producto (una sola vez por guía).
+        video = self._product_video(business_id, guide, details) if level == 1 else None
+        templates = ([VideoProductoTemplate(video[0])] if video else []) + [template]
+
+        sent = self._deliver(recipient, templates)
         self._register_outgoing(business_id, recipient, sent)
-        if not sent:
-            # Sin subir el nivel: se reintenta en la próxima corrida.
+        sent_ids = {sent_template.name: meta_message_id for sent_template, meta_message_id in sent}
+        if self._video_was_sent(video, set(sent_ids)):
+            report.videos += 1
+
+        if template.name not in sent_ids:
+            # Sin subir el nivel: se reintenta en la próxima corrida (sin
+            # repetir el video si ese sí salió).
             report.errors.append(tracking)
             return
 
-        # Si Meta reporta después que la plantilla falló, el backend baja
-        # el nivel y la próxima corrida la vuelve a enviar.
-        self._backend.mark_guide_tracking(tracking, level, sent[0][1])
+        # Ligada a la plantilla del nivel, no al video: si Meta reporta que
+        # falló, el backend baja el nivel y la próxima corrida la reenvía.
+        self._backend.mark_guide_tracking(tracking, level, sent_ids[template.name])
         report.notified[level] = report.notified.get(level, 0) + 1
 
     def _template(

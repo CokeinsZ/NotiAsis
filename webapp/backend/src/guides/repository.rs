@@ -200,13 +200,24 @@ impl GuideRepositoryTrait for PostgresGuideRepository {
             guide: Guide,
             #[sqlx(flatten)]
             details: GuideDetails,
+            video_sent: bool,
         }
 
         let guides_query = r#"
             SELECT number, user_id, business_id, last_notification_timestamp, notification_count,
                    tracking_level, tracking_notified_at,
                    order_id, customer_name, customer_document, delivery_address, city,
-                   shipping_company, order_total::float8 AS total, currency
+                   shipping_company, order_total::float8 AS total, currency,
+                   -- Los únicos videos salientes ligados a una guía son el
+                   -- video_producto del bot (los mensajes libres de la webapp
+                   -- no llevan guía).
+                   EXISTS (
+                       SELECT 1 FROM messages m
+                       WHERE m.guide_number = guides.number
+                         AND NOT m.from_user
+                         AND m.media_type = 'video'
+                         AND m.status IS DISTINCT FROM 'failed'
+                   ) AS video_sent
             FROM guides WHERE number = ANY($1)
         "#;
 
@@ -239,6 +250,7 @@ impl GuideRepositoryTrait for PostgresGuideRepository {
                 products: products_by_guide.remove(&row.guide.number).unwrap_or_default(),
                 guide: row.guide,
                 details: row.details,
+                video_sent: row.video_sent,
             })
             .collect())
     }
