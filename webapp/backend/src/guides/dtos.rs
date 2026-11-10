@@ -111,6 +111,22 @@ pub struct GuideLookupDto {
 pub struct MarkTrackingDto {
     #[validate(range(min = 1, max = 2, message = "El nivel de seguimiento debe ser 1 o 2"))]
     pub level: i16,
+
+    /// wamid de la plantilla enviada. Si Meta reporta que falló, el nivel
+    /// se deshace (POST /messages/{id}/errors).
+    #[serde(default)]
+    #[validate(length(min = 1, max = 255))]
+    pub meta_message_id: Option<String>,
+}
+
+/// Cuerpo (opcional) de POST /guides/{number}/notified.
+#[derive(Debug, Default, Serialize, Deserialize, Validate)]
+pub struct MarkNotifiedDto {
+    /// wamid del mensaje principal de la notificación. Si Meta reporta que
+    /// falló, el paso se deshace (POST /messages/{id}/errors).
+    #[serde(default)]
+    #[validate(length(min = 1, max = 255))]
+    pub meta_message_id: Option<String>,
 }
 
 /// Datos del pedido guardados en las columnas de `guides`.
@@ -258,10 +274,21 @@ mod tests {
 
     #[test]
     fn tracking_level_must_be_1_or_2() {
-        assert!(MarkTrackingDto { level: 1 }.validate().is_ok());
-        assert!(MarkTrackingDto { level: 2 }.validate().is_ok());
-        assert!(MarkTrackingDto { level: 0 }.validate().is_err());
-        assert!(MarkTrackingDto { level: 3 }.validate().is_err());
+        let dto = |level| MarkTrackingDto { level, meta_message_id: None };
+        assert!(dto(1).validate().is_ok());
+        assert!(dto(2).validate().is_ok());
+        assert!(dto(0).validate().is_err());
+        assert!(dto(3).validate().is_err());
+    }
+
+    #[test]
+    fn mark_bodies_accept_an_optional_message_id() {
+        let tracking: MarkTrackingDto = serde_json::from_str(r#"{"level": 1}"#).unwrap();
+        assert!(tracking.meta_message_id.is_none());
+
+        let notified: MarkNotifiedDto = serde_json::from_str(r#"{"meta_message_id": "wamid.1"}"#).unwrap();
+        assert_eq!(notified.meta_message_id.as_deref(), Some("wamid.1"));
+        assert!(MarkNotifiedDto { meta_message_id: Some(String::new()) }.validate().is_err());
     }
 
     #[test]

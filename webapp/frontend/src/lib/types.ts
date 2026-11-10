@@ -19,7 +19,7 @@ export interface ChatSummary {
 }
 
 export type MediaType = "text" | "document" | "audio" | "image" | "video";
-export type MessageStatus = "sent" | "delivered" | "read";
+export type MessageStatus = "sent" | "delivered" | "read" | "failed";
 
 /** Fila cruda del backend: notificaciones por día, tipo y notification_count. */
 export interface NotificationStatRow {

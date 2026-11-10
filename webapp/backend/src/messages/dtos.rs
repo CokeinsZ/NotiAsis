@@ -30,6 +30,9 @@ pub enum MessageStatus {
     Sent,
     Delivered,
     Read,
+    /// Meta aceptó el envío pero no lo pudo entregar (el detalle está en
+    /// messages_errors). Se registra con POST /messages/{id}/errors.
+    Failed,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -119,6 +122,51 @@ pub struct UpdateMessageStatusDto {
     pub status: MessageStatus,
 }
 
+/// Error de un mensaje enviado, reportado por Meta en el webhook (estado
+/// 'failed'). El bot lo reenvía tal cual llega.
+#[derive(Debug, Serialize, Deserialize, Validate)]
+pub struct RegisterMessageErrorDto {
+    /// errors[0].code, ej. 131048.
+    pub error_code: Option<i32>,
+
+    /// errors[0].title, ej. "Spam Rate limit hit".
+    #[validate(length(max = 255))]
+    pub error_title: Option<String>,
+
+    /// El estado completo que envió Meta (id, status, timestamp,
+    /// recipient_id, errors...).
+    #[validate(custom(function = "validate_json_object"))]
+    pub payload: serde_json::Value,
+}
+
+/// Notificación de una guía deshecha porque su mensaje falló: la guía
+/// volvió al paso (kind 'office') o nivel (kind 'tracking') anterior.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(sqlx::FromRow)]
+pub struct UndoneNotification {
+    pub guide_number: Option<String>,
+    pub kind: String,
+    pub notification_step: i32,
+}
+
+/// Resultado de registrar el error de un mensaje.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct MessageFailure {
+    /// Si el mensaje estaba registrado (y quedó en 'failed'). Si aún no,
+    /// nace 'failed' cuando el bot lo registre.
+    pub message_found: bool,
+    pub undone: Vec<UndoneNotification>,
+}
+
+fn validate_json_object(value: &serde_json::Value) -> Result<(), validator::ValidationError> {
+    if value.is_object() {
+        return Ok(());
+    }
+    let mut error = validator::ValidationError::new("object");
+    error.message = Some("payload debe ser el objeto del estado que envió Meta".into());
+    Err(error)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -153,5 +201,18 @@ mod tests {
     fn status_deserializes_from_meta_lowercase() {
         let dto: UpdateMessageStatusDto = serde_json::from_str(r#"{"status": "delivered"}"#).unwrap();
         assert_eq!(dto.status, MessageStatus::Delivered);
+    }
+
+    #[test]
+    fn error_payload_must_be_the_status_object() {
+        let dto: RegisterMessageErrorDto = serde_json::from_str(
+            r#"{"error_code": 131048, "error_title": "Spam Rate limit hit",
+                "payload": {"id": "wamid.1", "status": "failed", "errors": [{"code": 131048}]}}"#,
+        )
+        .unwrap();
+        assert!(dto.validate().is_ok());
+
+        let not_object = RegisterMessageErrorDto { payload: serde_json::json!("failed"), ..dto };
+        assert!(not_object.validate().is_err());
     }
 }

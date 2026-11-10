@@ -199,7 +199,7 @@ class SheetNotificationService:
             return
 
         self._register_outgoing(business_id, recipient, sent)
-        self._backend.mark_guide_notified(recipient.tracking_number)
+        self._backend.mark_guide_notified(recipient.tracking_number, sent[-1][1])
         if step is NotificationStep.REMINDER:
             report.reminders += 1
         else:
@@ -239,7 +239,8 @@ class SheetNotificationService:
             report.errors.append(tracking)
             return
 
-        self._backend.mark_guide_notified(tracking)
+        # Ligada al mensaje_guia (la última plantilla).
+        self._backend.mark_guide_notified(tracking, sent[-1][1])
         report.new_notifications += 1
 
     @staticmethod

@@ -135,18 +135,22 @@ class ShippingNotificationService:
             else:
                 templates = [REMINDER_FACTORIES[step](recipient, media_id)]
 
-        sent = self._notify_recipient(recipient, templates, business_id)
-        if sent:
-            self._backend.mark_guide_notified(tracking_number)
-        return sent
+        last_message_id = self._notify_recipient(recipient, templates, business_id)
+        if last_message_id is None:
+            return False
+        # Ligada al último mensaje enviado: si Meta reporta que falló, el
+        # backend deshace la notificación.
+        self._backend.mark_guide_notified(tracking_number, last_message_id)
+        return True
 
     def _notify_recipient(
         self,
         recipient: RecipientInfo,
         templates: list[TemplateMessage],
         business_id: int | None,
-    ) -> bool:
-        """Envía las plantillas dadas, en orden, y las registra."""
+    ) -> str | None:
+        """Envía las plantillas dadas, en orden, y las registra. Retorna el
+        meta_message_id de la última enviada, o None si no se envió ninguna."""
         # Mientras NOTIFICATION_OVERRIDE_NUMBER esté configurado, todas las
         # notificaciones se desvían a ese número (útil en pruebas).
         target_number = self._notification_override_number or recipient.phone
@@ -179,4 +183,4 @@ class ShippingNotificationService:
                     guide_number=recipient.tracking_number,
                 )
 
-        return bool(sent_templates)
+        return sent_templates[-1][1] if sent_templates else None

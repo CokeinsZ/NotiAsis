@@ -163,19 +163,35 @@ class RustBackendClient(NotificationBackend):
             print(f"Error fetching sheet config for business {business_id}: {e}")
             return None
 
-    def mark_guide_notified(self, number: str) -> None:
+    def mark_guide_notified(self, number: str, meta_message_id: str | None = None) -> None:
         try:
-            response = self._request("POST", f"/guides/{number}/notified")
+            response = self._request(
+                "POST", f"/guides/{number}/notified", json={"meta_message_id": meta_message_id}
+            )
             response.raise_for_status()
+            self._warn_if_not_counted(response, f"Guide {number} notification")
         except Exception as e:
             print(f"Error marking guide {number} as notified: {e}")
 
-    def mark_guide_tracking(self, number: str, level: int) -> None:
+    def mark_guide_tracking(self, number: str, level: int, meta_message_id: str | None = None) -> None:
         try:
-            response = self._request("POST", f"/guides/{number}/tracking", json={"level": level})
+            response = self._request(
+                "POST",
+                f"/guides/{number}/tracking",
+                json={"level": level, "meta_message_id": meta_message_id},
+            )
             response.raise_for_status()
         except Exception as e:
             print(f"Error marking tracking level {level} of guide {number}: {e}")
+
+    @staticmethod
+    def _warn_if_not_counted(response, what: str) -> None:
+        """`updated: false`: Meta ya había reportado que el mensaje falló."""
+        try:
+            if response.json().get("updated") is False:
+                print(f"{what} not counted: its message already failed")
+        except ValueError:
+            pass
 
     def register_incoming_message(
         self,
@@ -252,3 +268,25 @@ class RustBackendClient(NotificationBackend):
             response.raise_for_status()
         except Exception as e:
             print(f"Error updating status of message {meta_message_id}: {e}")
+
+    def register_message_error(
+        self,
+        meta_message_id: str,
+        error_code: int | None,
+        error_title: str | None,
+        payload: dict,
+    ) -> None:
+        try:
+            response = self._request(
+                "POST",
+                f"/messages/{meta_message_id}/errors",
+                json={"error_code": error_code, "error_title": error_title, "payload": payload},
+            )
+            response.raise_for_status()
+            for undone in response.json().get("undone", []):
+                print(
+                    f"Message {meta_message_id} failed ({error_code}): guide {undone.get('guide_number')} "
+                    f"{undone.get('kind')} notification {undone.get('notification_step')} undone"
+                )
+        except Exception as e:
+            print(f"Error registering failure of message {meta_message_id}: {e}")

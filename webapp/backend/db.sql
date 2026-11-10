@@ -246,10 +246,34 @@ CREATE TABLE IF NOT EXISTS guide_notifications (
 -- (notification_step = nivel: 1 pedido_enviado_1, 2 pedido_camino_1).
 ALTER TABLE guide_notifications ADD COLUMN IF NOT EXISTS kind VARCHAR(16) NOT NULL DEFAULT 'office';
 
+-- Mensaje principal de la notificación (wamid). Meta acepta el envío y
+-- avisa después por webhook si falló: entonces la notificación se borra y
+-- la guía vuelve al paso o nivel anterior (se reintenta en la próxima
+-- corrida del job). NULL en las notificaciones anteriores a este cambio.
+ALTER TABLE guide_notifications ADD COLUMN IF NOT EXISTS meta_message_id VARCHAR(255);
+
+-- Estado de un mensaje que Meta aceptó pero no pudo entregar (webhook
+-- con status 'failed'). El detalle queda en messages_errors.
+ALTER TYPE message_status_enum ADD VALUE IF NOT EXISTS 'failed';
+
+-- Errores que Meta reporta de los mensajes enviados. Sin llave foránea a
+-- messages a propósito: el webhook del error puede llegar antes de que el
+-- bot registre el mensaje (y un mensaje rechazado por el backend no queda
+-- registrado, pero su error sí).
+CREATE TABLE IF NOT EXISTS messages_errors (
+	id SERIAL PRIMARY KEY,
+	meta_message_id VARCHAR(255) UNIQUE NOT NULL,
+	error_code INT,                 -- ej. 131048
+	error_title VARCHAR(255),       -- ej. 'Spam Rate limit hit'
+	payload JSONB NOT NULL,         -- el estado completo que envió Meta
+	created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
 CREATE INDEX IF NOT EXISTS idx_messages_chat_time ON messages (business_id, user_id, created_at DESC);
 -- Autorizar la descarga de multimedia: el media_id debe ser de un mensaje del business.
 CREATE INDEX IF NOT EXISTS idx_messages_media ON messages (media_id) WHERE media_id IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_chats_business_activity ON chats (business_id, last_user_message_timestamp DESC);
 CREATE INDEX IF NOT EXISTS idx_guide_notifications_business_date ON guide_notifications (business_id, (created_at::date));
 CREATE INDEX IF NOT EXISTS idx_guide_notifications_guide ON guide_notifications (guide_number);
+CREATE INDEX IF NOT EXISTS idx_guide_notifications_message ON guide_notifications (meta_message_id) WHERE meta_message_id IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_guide_products_guide ON guide_products (guide_number);

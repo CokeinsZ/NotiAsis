@@ -246,7 +246,9 @@ class DropiTrackingNotificationService(DropiOrderNotifier):
             report.errors.append(tracking)
             return
 
-        self._backend.mark_guide_tracking(tracking, level)
+        # Si Meta reporta después que la plantilla falló, el backend baja
+        # el nivel y la próxima corrida la vuelve a enviar.
+        self._backend.mark_guide_tracking(tracking, level, sent[0][1])
         report.notified[level] = report.notified.get(level, 0) + 1
 
     def _template(

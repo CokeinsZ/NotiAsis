@@ -172,14 +172,19 @@ class NotificationBackend(ABC):
         office_id, delivered_id). None si no existe o el backend falla."""
 
     @abstractmethod
-    def mark_guide_notified(self, number: str) -> None:
-        """Marca la guía como notificada al destinatario."""
+    def mark_guide_notified(self, number: str, meta_message_id: str | None = None) -> None:
+        """Marca la guía como notificada al destinatario.
+
+        `meta_message_id` es el mensaje principal de la notificación: si
+        Meta reporta después que falló, el backend la deshace y la guía se
+        reintenta en la próxima corrida."""
 
     @abstractmethod
-    def mark_guide_tracking(self, number: str, level: int) -> None:
+    def mark_guide_tracking(self, number: str, level: int, meta_message_id: str | None = None) -> None:
         """Registra que la guía recibió la notificación de seguimiento del
         envío del nivel `level` (1 o 2). El backend solo sube el nivel y no
-        toca `notification_count` (el del nivel 3, reclame en oficina)."""
+        toca `notification_count` (el del nivel 3, reclame en oficina).
+        `meta_message_id` como en `mark_guide_notified`."""
 
     @abstractmethod
     def register_incoming_message(
@@ -220,3 +225,17 @@ class NotificationBackend(ABC):
     @abstractmethod
     def update_message_status(self, meta_message_id: str, status: str) -> None:
         """Actualiza el estado (sent/delivered/read) de un mensaje saliente."""
+
+    @abstractmethod
+    def register_message_error(
+        self,
+        meta_message_id: str,
+        error_code: int | None,
+        error_title: str | None,
+        payload: dict,
+    ) -> None:
+        """Meta reportó que un mensaje enviado falló (estado 'failed').
+
+        El backend guarda el error con el estado completo (`payload`), deja
+        el mensaje en 'failed' y deshace la notificación de guía ligada a
+        él. No se reintenta aquí: lo hace la próxima corrida del job."""

@@ -350,11 +350,11 @@ mod tests {
             unimplemented!()
         }
 
-        async fn mark_notified(&self, _: &str) -> Result<(), String> {
+        async fn mark_notified(&self, _: &str, _: Option<&str>) -> Result<bool, String> {
             unimplemented!()
         }
 
-        async fn mark_tracking(&self, _: &str, _: i16) -> Result<bool, String> {
+        async fn mark_tracking(&self, _: &str, _: i16, _: Option<&str>) -> Result<bool, String> {
             unimplemented!()
         }
 

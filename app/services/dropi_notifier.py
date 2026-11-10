@@ -214,7 +214,8 @@ class DropiNotificationService(DropiOrderNotifier):
 
         sent = self._deliver(recipient, templates)
         self._register_outgoing(business_id, recipient, sent)
-        sent_names = {template.name for template, _ in sent}
+        sent_ids = {template.name: meta_message_id for template, meta_message_id in sent}
+        sent_names = set(sent_ids)
 
         video_sent = VideoProductoTemplate.TEMPLATE_NAME in sent_names
         if video and not video_sent:
@@ -228,7 +229,9 @@ class DropiNotificationService(DropiOrderNotifier):
             report.errors.append(tracking)
             return
 
-        self._backend.mark_guide_notified(tracking)
+        # Ligada a la notificación del día: si Meta reporta que falló, el
+        # backend deshace el paso (el video solo no la deshace).
+        self._backend.mark_guide_notified(tracking, sent_ids[templates[-1].name])
         if step is NotificationStep.REMINDER:
             report.reminders += 1
         elif step is NotificationStep.FINAL_REMINDER:

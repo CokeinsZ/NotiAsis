@@ -72,6 +72,7 @@ class FakeBackend:
         self.lookups = []
         self.registered = []
         self.notified = []
+        self.notified_messages = []  # mensaje ligado a cada marca
         self.outgoing = []
 
     def get_business_country(self, business_id):
@@ -91,8 +92,9 @@ class FakeBackend:
         self.guides[number] = guide(number, user_phone, count=0, business_id=business_id)
         return True
 
-    def mark_guide_notified(self, number):
+    def mark_guide_notified(self, number, meta_message_id=None):
         self.notified.append(number)
+        self.notified_messages.append(meta_message_id)
 
     def register_outgoing_message(self, **kwargs):
         self.outgoing.append(kwargs)
@@ -314,6 +316,9 @@ def test_new_guide_sends_video_then_mensaje_guia_and_stores_order():
     assert [(m["media_type"], m["media_id"]) for m in backend.outgoing] == [("video", "media-asad"), ("text", None)]
     assert {m["guide_number"] for m in backend.outgoing} == {"240063856178"}
     assert backend.notified == ["240063856178"]
+    # Ligada al mensaje_guia_es, no al video: si Meta reporta que el
+    # mensaje_guia falló, el backend deshace el paso; si solo falla el video, no.
+    assert backend.notified_messages == ["wamid.dropi.2"]
 
 
 def test_new_guide_without_product_video_sends_only_mensaje_guia():

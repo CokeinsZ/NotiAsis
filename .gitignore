@@ -6,3 +6,4 @@ webapp/frontend/node_modules
 webapp/frontend/.next
 *.sh
 /media/
+*.log.txt

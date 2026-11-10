@@ -5,7 +5,8 @@ use chrono::{Duration, NaiveDateTime};
 
 use crate::chats::repository::ChatRepositoryTrait;
 use crate::messages::dtos::{
-    IncomingMessageDto, MediaType, Message, MessageStatus, OutgoingMessageDto, SendMessageDto,
+    IncomingMessageDto, MediaType, Message, MessageFailure, MessageStatus, OutgoingMessageDto,
+    RegisterMessageErrorDto, SendMessageDto,
 };
 use crate::messages::meta_client::MetaClientTrait;
 use crate::messages::repository::{MessageRepositoryTrait, NewMessage};
@@ -331,6 +332,13 @@ pub trait MessageServiceTrait: Send + Sync {
     async fn register_incoming(&self, dto: IncomingMessageDto) -> Result<Message, String>;
     async fn register_outgoing(&self, dto: OutgoingMessageDto) -> Result<Message, String>;
     async fn update_status(&self, meta_message_id: &str, status: MessageStatus) -> Result<(), String>;
+    /// Meta reportó que el mensaje falló: guarda el error, lo deja en
+    /// 'failed' y deshace la notificación de guía ligada a él.
+    async fn register_failure(
+        &self,
+        meta_message_id: &str,
+        dto: RegisterMessageErrorDto,
+    ) -> Result<MessageFailure, String>;
     /// Descarga multimedia de Meta en memoria (sin tocar disco) para
     /// visualizarla/reproducirla en el navegador.
     async fn fetch_media(&self, media_id: &str) -> Result<(String, Vec<u8>), String>;
@@ -560,6 +568,11 @@ impl MessageServiceTrait for MessageService {
     }
 
     async fn update_status(&self, meta_message_id: &str, status: MessageStatus) -> Result<(), String> {
+        if status == MessageStatus::Failed {
+            // Sin el error no se puede deshacer la notificación de la guía.
+            return Err(format!("El estado failed se registra con POST /messages/{meta_message_id}/errors"));
+        }
+
         // Si el mensaje no está registrado (ej. enviado antes de este
         // sistema), simplemente se ignora la actualización.
         self.message_repository
@@ -567,6 +580,21 @@ impl MessageServiceTrait for MessageService {
             .await?;
 
         Ok(())
+    }
+
+    async fn register_failure(
+        &self,
+        meta_message_id: &str,
+        dto: RegisterMessageErrorDto,
+    ) -> Result<MessageFailure, String> {
+        let failure = self.message_repository.register_failure(meta_message_id, &dto).await?;
+        for undone in &failure.undone {
+            println!(
+                "Message {meta_message_id} failed ({:?}): guide {:?} {} notification {} undone",
+                dto.error_code, undone.guide_number, undone.kind, undone.notification_step
+            );
+        }
+        Ok(failure)
     }
 
     async fn fetch_media(&self, media_id: &str) -> Result<(String, Vec<u8>), String> {
@@ -636,6 +664,10 @@ mod tests {
 
         async fn update_status_by_meta_id(&self, _: &str, _: MessageStatus) -> Result<bool, String> {
             Ok(true)
+        }
+
+        async fn register_failure(&self, _: &str, _: &RegisterMessageErrorDto) -> Result<MessageFailure, String> {
+            Ok(MessageFailure::default())
         }
 
         async fn find_by_meta_id(&self, meta_message_id: &str) -> Result<Option<Message>, String> {

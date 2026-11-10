@@ -74,6 +74,7 @@ class FakeBackend:
         self.registered = []
         self.tracking_marks = []
         self.notified = []
+        self.tracking_messages = []  # mensaje ligado a cada marca de nivel
         self.outgoing = []
 
     def get_business_country(self, business_id):
@@ -99,12 +100,13 @@ class FakeBackend:
                                     details=stored, products=products)
         return True
 
-    def mark_guide_tracking(self, number, level):
+    def mark_guide_tracking(self, number, level, meta_message_id=None):
         self.tracking_marks.append((number, level))
+        self.tracking_messages.append(meta_message_id)
         stored = self.guides[number]
         stored["tracking_level"] = max(stored["tracking_level"], level)
 
-    def mark_guide_notified(self, number):
+    def mark_guide_notified(self, number, meta_message_id=None):
         self.notified.append(number)
 
     def register_outgoing_message(self, **kwargs):
@@ -266,6 +268,8 @@ def test_new_order_in_level_1_sends_pedido_enviado_and_stores_order():
     assert details["order_id"] == "96040863"
     assert details["products"][0]["product_name"] == "CAYENNE PEPPER. CM"
     assert backend.tracking_marks == [("034059582302", 1)]
+    # Ligada a la plantilla: si Meta reporta que falló, el backend baja el nivel.
+    assert backend.tracking_messages == ["wamid.tracking.1"]
     # El nivel 3 (reclame en oficina) sigue sin notificar.
     assert backend.notified == []
 
@@ -576,8 +580,46 @@ def test_backend_client_marks_tracking_level():
     client._session = Session()
 
     client.mark_guide_tracking("G1", 2)
+    client.mark_guide_tracking("G1", 1, "wamid.1")
 
-    assert client._session.calls == [("POST", "http://backend/guides/G1/tracking", {"level": 2})]
+    assert client._session.calls == [
+        ("POST", "http://backend/guides/G1/tracking", {"level": 2, "meta_message_id": None}),
+        ("POST", "http://backend/guides/G1/tracking", {"level": 1, "meta_message_id": "wamid.1"}),
+    ]
+
+
+def test_backend_client_links_notification_and_reports_message_errors():
+    class Session:
+        def __init__(self):
+            self.calls = []
+
+        def request(self, method, url, headers=None, timeout=None, **kwargs):
+            self.calls.append((method, url, kwargs.get("json")))
+
+            class Response:
+                status_code = 201
+
+                def raise_for_status(self):
+                    pass
+
+                def json(self):
+                    return {"updated": True, "undone": []}
+
+            return Response()
+
+    client = RustBackendClient("http://backend", api_key="k")
+    client._token = "token"
+    client._session = Session()
+    payload = {"id": "wamid.9", "status": "failed", "errors": [{"code": 131048, "title": "Spam Rate limit hit"}]}
+
+    client.mark_guide_notified("G1", "wamid.8")
+    client.register_message_error("wamid.9", 131048, "Spam Rate limit hit", payload)
+
+    assert client._session.calls == [
+        ("POST", "http://backend/guides/G1/notified", {"meta_message_id": "wamid.8"}),
+        ("POST", "http://backend/messages/wamid.9/errors",
+         {"error_code": 131048, "error_title": "Spam Rate limit hit", "payload": payload}),
+    ]
 
 
 # ------------------------------ Endpoint ------------------------------

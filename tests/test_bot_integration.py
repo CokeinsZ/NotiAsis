@@ -27,6 +27,8 @@ class FakeBackend:
         self.guides_created = guides_created
         self.guides_registered = []
         self.guides_notified = []
+        self.message_errors = []
+        self.notified_messages = []  # mensaje ligado a cada marca
         self.incoming = []
         self.outgoing = []
         self.status_updates = []
@@ -55,8 +57,9 @@ class FakeBackend:
             self.guide_counts[number] = 0
         return self.guides_created
 
-    def mark_guide_notified(self, number):
+    def mark_guide_notified(self, number, meta_message_id=None):
         self.guides_notified.append(number)
+        self.notified_messages.append(meta_message_id)
         if number in self.guide_counts:
             self.guide_counts[number] += 1
 
@@ -68,6 +71,9 @@ class FakeBackend:
 
     def update_message_status(self, meta_message_id, status):
         self.status_updates.append((meta_message_id, status))
+
+    def register_message_error(self, meta_message_id, error_code, error_title, payload):
+        self.message_errors.append((meta_message_id, error_code, error_title, payload))
 
 
 class FakeMediaRepository:
@@ -192,6 +198,8 @@ def test_new_guide_sends_templates_and_registers_everything():
     assert "Collar Girasol" in backend.outgoing[1]["message"]
     # meta_message_ids reales propagados
     assert backend.outgoing[0]["meta_message_id"] == "wamid.fake.1"
+    # La notificación queda ligada al mensaje_guia: si falla, se deshace
+    assert backend.notified_messages == ["wamid.fake.2"]
     # Guía marcada como notificada
     assert backend.guides_notified == ["GUIA123"]
     # Cada mensaje queda ligado a la guía que notifica
@@ -299,13 +307,47 @@ def test_status_updates_are_forwarded_to_backend():
             "statuses": [
                 {"id": "wamid.abc", "status": "delivered", "timestamp": "1787200430"},
                 {"id": "wamid.def", "status": "read", "timestamp": "1787200450"},
-                {"id": "wamid.ghi", "status": "failed", "timestamp": "1787200460"},
             ],
         }}]}]
     })
 
-    # 'failed' no está soportado por message_status_enum: se ignora
     assert backend.status_updates == [("wamid.abc", "delivered"), ("wamid.def", "read")]
+    assert backend.message_errors == []
+
+
+def test_failed_status_is_registered_as_message_error_with_the_full_payload():
+    backend = FakeBackend()
+    processor = build_processor(backend)
+    # Estado real de Meta (log del 8 de noviembre)
+    failed = {
+        "id": "wamid.ghi",
+        "status": "failed",
+        "timestamp": "1794144434",
+        "recipient_id": "573001234567",
+        "errors": [{
+            "code": 131048,
+            "title": "Spam Rate limit hit",
+            "message": "Spam Rate limit hit",
+            "error_data": {"details": "Message failed to send because there are restrictions on how many messages can be sent from this phone number."},
+        }],
+    }
+
+    processor.handle_event({"entry": [{"changes": [{"value": {"statuses": [failed]}}]}]})
+
+    # No es un estado normal: el backend lo registra como error (y deshace
+    # la notificación de la guía). No se reintenta aquí.
+    assert backend.status_updates == []
+    assert backend.message_errors == [("wamid.ghi", 131048, "Spam Rate limit hit", failed)]
+
+
+def test_failed_status_without_errors_is_still_registered():
+    backend = FakeBackend()
+    processor = build_processor(backend)
+    failed = {"id": "wamid.x", "status": "failed", "timestamp": "1"}
+
+    processor.handle_event({"entry": [{"changes": [{"value": {"statuses": [failed]}}]}]})
+
+    assert backend.message_errors == [("wamid.x", None, None, failed)]
 
 
 def test_user_text_message_is_registered_as_incoming():

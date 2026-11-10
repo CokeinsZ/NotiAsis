@@ -11,6 +11,14 @@ function StatusTicks({ status }: { status: Message["status"] }) {
   if (status === "delivered") {
     return <span className="text-neutral-400">✓✓</span>;
   }
+  if (status === "failed") {
+    // Meta aceptó el envío pero no lo entregó (el detalle está en messages_errors).
+    return (
+      <span className="text-red-400" title="Meta no pudo entregar este mensaje">
+        ! No entregado
+      </span>
+    );
+  }
   return <span className="text-moon">✓✓</span>; // read
 }
 

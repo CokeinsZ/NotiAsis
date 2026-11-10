@@ -91,6 +91,20 @@ El bot consume la API del backend (`BACKEND_API_URL`):
   que el bot lee de `GET /businesses/{id}`).
 - **Estados que reporta Meta** (sent/delivered/read):
   `PATCH /messages/{meta_message_id}/status`.
+- **Mensajes que Meta acepta pero no entrega** (webhook con estado
+  `failed`, ej. 131048 *Spam Rate limit hit* al pasar el límite diario):
+  `POST /messages/{meta_message_id}/errors` con el estado completo de
+  Meta. El backend guarda el error en `messages_errors`, deja el mensaje
+  en `failed` (en el chat sale "No entregado") y, si era el mensaje de
+  una notificación de guía, la borra de `guide_notifications` y devuelve
+  la guía al paso de oficina o nivel de seguimiento anterior. No se
+  reintenta en el momento: la próxima corrida del job la vuelve a
+  enviar. Por eso el bot marca cada notificación con el `meta_message_id`
+  de su mensaje principal (`mensaje_guia_es` en la inicial; el video
+  solo no la deshace). El aviso de Meta llega entre 1 y 20 segundos
+  después del envío y puede ganarle a la marca del bot: un bloqueo por
+  mensaje en Postgres hace que el mensaje nazca `failed` y la marca no
+  avance si el error llegó primero.
 
 Todos los teléfonos se normalizan sin '+' en ambos servicios antes de
 guardarse o compararse (los números de 10 dígitos, como los del Google
@@ -318,10 +332,11 @@ o 2 dentro del rango de fechas; para empezar con menos, enviar un `from`
 reciente.
 
 Despliegue, en este orden: 1) correr `webapp/backend/db.sql` (agrega
-`tracking_level` y `tracking_notified_at` a `guides` y `kind` a
-`guide_notifications`; el backend nuevo las lee en las consultas de
-guías y del dashboard), 2) desplegar el backend y el frontend,
-3) desplegar el bot. Si el backend no devuelve `tracking_level`, la
+`tracking_level` y `tracking_notified_at` a `guides`, `kind` y
+`meta_message_id` a `guide_notifications`, el estado `failed` a
+`message_status_enum` y la tabla `messages_errors`), 2) desplegar el
+backend y el frontend (el backend anterior no sabe leer mensajes en
+`failed`), 3) desplegar el bot. Si el backend no devuelve `tracking_level`, la
 corrida no envía nada (registra el error en los logs) para no repetir
 notificaciones.
 
@@ -512,11 +527,12 @@ Solo para el bot (token de api_key; un asociado recibe 403) y la administración
 | GET | `/associates/phones` | Números autorizados (reemplaza `ALLOWED_SENDER_NUMBERS`) |
 | POST | `/messages/incoming` | Registrar mensaje entrante del webhook. `reply_to_meta_message_id` opcional: el mensaje que el cliente citó |
 | POST | `/messages/outgoing` | Registrar plantilla enviada, con la guía que notifica (`guide_number`) |
-| PATCH | `/messages/{meta_message_id}/status` | Actualizar estado (`sent`/`delivered`/`read`) |
+| PATCH | `/messages/{meta_message_id}/status` | Actualizar estado (`sent`/`delivered`/`read`; nunca cambia un `failed`) |
+| POST | `/messages/{meta_message_id}/errors` | `{"error_code", "error_title", "payload"}`: Meta reportó que el mensaje falló. Lo deja en `failed`, guarda el error y deshace la notificación de guía ligada a él (`undone`). Idempotente |
 | POST | `/guides` | Registrar guía; responde `created: false` si es duplicada (no re-notificar). `details` opcional (cliente y productos del pedido) se guarda aunque la guía ya existiera |
 | POST | `/guides/lookup` | `{"numbers": [...]}` (máx. 500) → guías existentes con `notification_count`, `details` y `products` |
-| POST | `/guides/{number}/notified` | Marcar cuándo se notificó la guía |
-| POST | `/guides/{number}/tracking` | `{"level": 1\|2}`: nivel de seguimiento del envío notificado. Solo sube (`updated: false` si ya tenía ese nivel o uno mayor); 404 si la guía no existe |
+| POST | `/guides/{number}/notified` | Contar una notificación de oficina. Cuerpo opcional `{"meta_message_id"}`: el mensaje principal (`updated: false` si Meta ya lo reportó como fallido) |
+| POST | `/guides/{number}/tracking` | `{"level": 1\|2, "meta_message_id"}`: nivel de seguimiento del envío notificado. Solo sube (`updated: false` si ya tenía ese nivel o uno mayor, o si el mensaje ya falló); 404 si la guía no existe |
 
 La sesión usa JWT en `localStorage` (15 min, renovado automáticamente al
 enviar mensajes libres). Pendiente: refresh tokens y cookies httpOnly para

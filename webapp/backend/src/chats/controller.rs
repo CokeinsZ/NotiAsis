@@ -336,7 +336,9 @@ mod tests {
     use crate::auth::service::AuthServiceTrait;
     use crate::chats::dtos::ChatSummary;
     use crate::chats::service::ChatServiceTrait;
-    use crate::messages::dtos::{IncomingMessageDto, Message, MessageStatus, OutgoingMessageDto};
+    use crate::messages::dtos::{
+        IncomingMessageDto, Message, MessageFailure, MessageStatus, OutgoingMessageDto, RegisterMessageErrorDto,
+    };
     use crate::messages::service::MessageServiceTrait;
     use crate::state::AppState;
 
@@ -429,6 +431,10 @@ mod tests {
 
         async fn update_status(&self, _: &str, _: MessageStatus) -> Result<(), String> {
             Ok(())
+        }
+
+        async fn register_failure(&self, _: &str, _: RegisterMessageErrorDto) -> Result<MessageFailure, String> {
+            unimplemented!()
         }
 
         async fn fetch_media(&self, _: &str) -> Result<(String, Vec<u8>), String> {

@@ -57,6 +57,7 @@ class FakeBackend:
         }
         self.guides_registered = []
         self.guides_notified = []
+        self.notified_messages = []  # mensaje ligado a cada marca
         self.outgoing = []
         self.country = PhoneCountry("57", 10)
 
@@ -82,8 +83,9 @@ class FakeBackend:
         self.guides_registered.append(number)
         return True
 
-    def mark_guide_notified(self, number):
+    def mark_guide_notified(self, number, meta_message_id=None):
         self.guides_notified.append(number)
+        self.notified_messages.append(meta_message_id)
         if number in self.guide_counts:
             self.guide_counts[number] += 1
 
@@ -207,6 +209,7 @@ def test_pending_guide_never_notified_sends_both_templates():
     # Guía registrada y marcada; mensajes en el historial
     assert backend.guides_registered == ["G3"]
     assert backend.guides_notified == ["G3"]
+    assert backend.notified_messages == ["wamid.sheet.2"]  # el mensaje_guia
     assert len(backend.outgoing) == 2
     assert backend.outgoing[0]["media_id"] == "media-1"
     assert {o["guide_number"] for o in backend.outgoing} == {"G3"}
