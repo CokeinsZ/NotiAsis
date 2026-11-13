@@ -150,7 +150,7 @@ Cada fila trae `kind` y `notification_count` (tabla `guide_notifications`):
 
 | `kind` | `notification_count` | En el dashboard |
 |---|---|---|
-| `tracking` | 1 | Pedido enviado (`pedido_enviado_1`) |
+| `tracking` | 1 | Pedido enviado (`pedido_enviado_2`) |
 | `tracking` | 2 | Pedido en camino (`pedido_camino_1`) |
 | `office` | 1 | Oficina inicial |
 | `office` | 2 | Recordatorio |
@@ -300,16 +300,16 @@ curl -X POST "localhost:8000/notify-dropi-tracking?business_id=1"
 
 | Nivel | Estados de Dropi | Plantilla |
 |---|---|---|
-| 1 | `GUIA_GENERADA`, `PREPARADO PARA TRANSPORTADORA`, `ENTREGADO A TRANSPORTADORA`, `ADMITIDA`, `RECOLECTADO` | `video_producto` (si el producto tiene video) + `pedido_enviado_1` (nombre, guía, producto, valor a pagar, transportadora) |
+| 1 | `GUIA_GENERADA`, `PREPARADO PARA TRANSPORTADORA`, `ENTREGADO A TRANSPORTADORA`, `ADMITIDA`, `RECOLECTADO` | `video_producto` (si el producto tiene video) + `pedido_enviado_2` (nombre, guía, producto, precio con el símbolo de su moneda —`$84.900`, `Q229`—, transportadora) |
 | 2 | `EN TRANSPORTE`, `EN REPARTO`, `DESPACHADA`, `EN DESPACHO`, `EN RUTA` | `pedido_camino_1` (nombre, producto, guía, dirección y ciudad de entrega) |
 | 3 | `RECLAME EN OFICINA` | lo maneja `/notify-dropi-mcp` |
 
-El video del producto va **una sola vez por guía**: con `pedido_enviado_1`
+El video del producto va **una sola vez por guía**: con `pedido_enviado_2`
 en el nivel 1 o, si la guía no pasó por ese nivel, con el aviso inicial en
 oficina. El backend lo sabe por el historial (`video_sent` en
 `/guides/lookup`: un video saliente de la guía que no falló; si Meta lo
 rechazó, se vuelve a enviar). Un video rechazado no deshace el nivel: este
-va ligado a `pedido_enviado_1`. Los dos endpoints comparten la misma
+va ligado a `pedido_enviado_2`. Los dos endpoints comparten la misma
 biblioteca de videos (un solo caché de `media_id`).
 
 Los estados viven en `TRACKING_LEVELS`

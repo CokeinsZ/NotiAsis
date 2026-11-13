@@ -3,7 +3,7 @@
 
 | Nivel | Estados de Dropi                       | Se envía                                  |
 |-------|----------------------------------------|-------------------------------------------|
-| 1     | TRACKING_LEVELS[1] (listo para envío)  | video_producto (si hay) + pedido_enviado_1 |
+| 1     | TRACKING_LEVELS[1] (listo para envío)  | video_producto (si hay) + pedido_enviado_2 |
 | 2     | TRACKING_LEVELS[2] (en camino)         | pedido_camino_1                           |
 | 3     | RECLAME EN OFICINA                     | lo maneja /notify-dropi-mcp               |
 
@@ -258,7 +258,7 @@ class DropiTrackingNotificationService(DropiOrderNotifier):
         if not self._within_quota(quota, phone, tracking, report):
             return
         recipient = self._build_recipient(order, details, phone, self._address_with_city(order, details))
-        template = self._template(level, recipient, order, details)
+        template = self._template(level, recipient, order, details, country)
         if template is None:
             print(f"Dropi guide {tracking}: incomplete order data for level {level}, skipping")
             report.skipped.append(tracking)
@@ -296,17 +296,17 @@ class DropiTrackingNotificationService(DropiOrderNotifier):
         report.notified[level] = report.notified.get(level, 0) + 1
 
     def _template(
-        self, level: int, recipient: RecipientInfo, order: dict, details: dict
+        self, level: int, recipient: RecipientInfo, order: dict, details: dict, country: PhoneCountry
     ) -> TemplateMessage | None:
         """Plantilla del nivel, o None si falta un dato que lleva."""
         if not (recipient.name and recipient.phone and recipient.tracking_number and recipient.product):
             return None
         if level == 1:
-            amount = self._amount_to_pay(order, details)
+            price = self._price_to_pay(order, details, country)
             carrier = self._carrier(order, details)
-            if amount is None or not carrier:
+            if price is None or not carrier:
                 return None
-            return PedidoEnviadoTemplate(recipient, amount, carrier)
+            return PedidoEnviadoTemplate(recipient, price, carrier)
         if level == 2:
             if not recipient.delivery_address:
                 return None

@@ -34,7 +34,7 @@ export interface NotificationStatRow {
 /** Un día de la gráfica, con los seis tipos ya pivotados. */
 export interface DayStats {
   day: string;
-  /** Seguimiento nivel 1 (pedido_enviado_1): listo para envío. */
+  /** Seguimiento nivel 1 (pedido_enviado_2): listo para envío. */
   shipped: number;
   /** Seguimiento nivel 2 (pedido_camino_1): en camino. */
   inTransit: number;

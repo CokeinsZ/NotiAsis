@@ -24,6 +24,9 @@ class PhoneCountry:
 
     phone_prefix: str
     phone_length: int
+    # Código ISO del país ("CO", "GT"): de él sale la moneda si un pedido
+    # no la trae.
+    code: str = ""
 
 
 def to_international(phone: str, country: PhoneCountry) -> str:

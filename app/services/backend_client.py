@@ -159,7 +159,11 @@ class RustBackendClient(NotificationBackend):
             response = self._request("GET", f"/businesses/{business_id}")
             response.raise_for_status()
             country = response.json()["business"]["country"]
-            return PhoneCountry(phone_prefix=country["phone_prefix"], phone_length=int(country["phone_length"]))
+            return PhoneCountry(
+                phone_prefix=country["phone_prefix"],
+                phone_length=int(country["phone_length"]),
+                code=str(country.get("code") or "").strip().upper(),
+            )
         except Exception as e:
             print(f"Error fetching country of business {business_id}: {e}")
             return None

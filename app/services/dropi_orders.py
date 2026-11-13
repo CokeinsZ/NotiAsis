@@ -27,6 +27,16 @@ from app.whatsapp.templates.video_producto import VideoProductoTemplate
 # Pedido ya pagado: la transportadora no cobra nada al entregarlo.
 PREPAID_RATE_TYPE = "SIN RECAUDO"
 
+# Cómo se escribe un precio en cada moneda de Dropi: (símbolo, separador de
+# miles, separador decimal). "$84.900" en Colombia, "Q1,250.50" en Guatemala.
+CURRENCY_FORMATS = {
+    "COP": ("$", ".", ","),
+    "GTQ": ("Q", ",", "."),
+}
+
+# Moneda del país del business, si el pedido no la trae.
+COUNTRY_CURRENCIES = {"CO": "COP", "GT": "GTQ"}
+
 # Tope de páginas de /ordenes por estado y corrida: protege contra un
 # webhook que ignore `start` y devuelva siempre una página llena.
 MAX_ORDER_PAGES = 100
@@ -213,17 +223,37 @@ class DropiOrderNotifier:
     def _carrier(self, order: dict, details: dict) -> str:
         return self._clean(details.get("shipping_company") or order.get("shipping_company"))
 
-    def _amount_to_pay(self, order: dict, details: dict) -> str | None:
-        """Valor a cobrar al entregar con separador de miles ("84.900").
-        El total de /ordenes es el más reciente; si no viene, el guardado."""
+    def _total_to_pay(self, order: dict, details: dict) -> float | None:
+        """Valor a cobrar al entregar (0 si ya está pagado). El total de
+        /ordenes es el más reciente; si no viene, el guardado."""
         if self._clean(order.get("rate_type")).upper() == PREPAID_RATE_TYPE:
-            return "0"
+            return 0.0
         total = _as_float(order.get("total"))
         if total is None:
             total = _as_float(details.get("total"))
+        return total
+
+    def _amount_to_pay(self, order: dict, details: dict) -> str | None:
+        """Valor a cobrar sin símbolo y con separador de miles ("84.900"),
+        para las plantillas que ya traen el "$" (pedido_oficina)."""
+        total = self._total_to_pay(order, details)
         if total is None:
             return None
         return f"{round(total):,}".replace(",", ".")
+
+    def _price_to_pay(self, order: dict, details: dict, country: PhoneCountry) -> str | None:
+        """Valor a cobrar con el símbolo de su moneda ("$84.900", "Q229"),
+        para las plantillas que no lo traen (pedido_enviado_2). La moneda
+        es la del pedido; si no viene, la del país del business."""
+        total = self._total_to_pay(order, details)
+        currency = (
+            self._clean(order.get("currency"))
+            or self._clean(details.get("currency"))
+            or COUNTRY_CURRENCIES.get(country.code, "")
+        ).upper()
+        if total is None or not currency:
+            return None
+        return _format_money(total, currency)
 
     def _phone(self, order: dict, guide: dict | None, detail_phone: str, country: PhoneCountry) -> str:
         """El teléfono con el que ya existe el chat tiene prioridad. Los de
@@ -350,6 +380,17 @@ def _compact(text: str) -> str:
     "Interrapidísimo" con "INTER RAPIDISIMO"."""
     plain = unicodedata.normalize("NFKD", text).encode("ascii", "ignore").decode().lower()
     return re.sub(r"[^a-z0-9]", "", plain)
+
+
+def _format_money(amount: float, currency: str) -> str:
+    """"$84.900", "Q229", "Q1,250.50": centavos solo si los hay. Una moneda
+    sin formato conocido va con su código ("USD 1,250")."""
+    symbol, thousands, decimal = CURRENCY_FORMATS.get(currency, (f"{currency} ", ",", "."))
+    units, cents = divmod(round(abs(amount) * 100), 100)
+    text = f"{units:,}".replace(",", thousands)
+    if cents:
+        text += f"{decimal}{cents:02d}"
+    return f"{symbol}{text}"
 
 
 def _as_int(value) -> int | None:

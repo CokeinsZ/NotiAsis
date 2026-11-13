@@ -6,15 +6,16 @@ class PedidoEnviadoTemplate(TemplateMessage):
     """Seguimiento de pedidos de Dropi, nivel 1: el pedido está listo para
     que la transportadora lo traslade.
 
-    Variables del body: nombre, número de guía, producto, valor a pagar
-    (sin "$": la plantilla ya lo incluye) y transportadora.
+    Variables del body: nombre, número de guía, producto, precio a pagar
+    con el símbolo de su moneda ("$84.900", "Q229": la plantilla no lo
+    incluye) y transportadora.
     """
 
-    TEMPLATE_NAME = "pedido_enviado_1"  # Nombre registrado en Meta Business
+    TEMPLATE_NAME = "pedido_enviado_2"  # Nombre registrado en Meta Business
 
-    def __init__(self, recipient: RecipientInfo, amount: str, carrier: str) -> None:
+    def __init__(self, recipient: RecipientInfo, price: str, carrier: str) -> None:
         self._recipient = recipient
-        self._amount = amount
+        self._price = price
         self._carrier = carrier
 
     @property
@@ -29,7 +30,7 @@ class PedidoEnviadoTemplate(TemplateMessage):
             "\n"
             f"Guía: {self._recipient.tracking_number}\n"
             f"Producto: {self._recipient.product}\n"
-            f"Precio: *${self._amount}*\n"
+            f"Precio: *{self._price}*\n"
             f"Transportadora: {self._carrier}\n"
             "\n"
             "La transportadora iniciará el traslado de tu paquete en los próximos días. "
@@ -44,7 +45,7 @@ class PedidoEnviadoTemplate(TemplateMessage):
                     {"type": "text", "text": self._recipient.name},
                     {"type": "text", "text": self._recipient.tracking_number},
                     {"type": "text", "text": self._recipient.product},
-                    {"type": "text", "text": self._amount},
+                    {"type": "text", "text": self._price},
                     {"type": "text", "text": self._carrier},
                 ],
             }

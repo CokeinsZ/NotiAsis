@@ -25,6 +25,7 @@ from app.api.notify_dropi import router as notify_dropi_router
 from app.core.phones import PhoneCountry
 from app.models.shipping import RecipientInfo
 from app.services.backend_client import RustBackendClient
+from app.services.dropi_orders import _format_money
 from app.services.dropi_tracking_notifier import TRACKING_LEVELS, DropiTrackingNotificationService
 from app.services.run_guard import RunGuard
 from app.whatsapp.templates.pedido_camino import PedidoCaminoTemplate
@@ -303,8 +304,8 @@ def test_new_order_in_level_1_sends_pedido_enviado_and_stores_order():
 
     assert report.notified == {1: 1}
     assert source.order_calls == ["96040863"]  # única consulta al MCP
-    assert sent_names(sender) == ["pedido_enviado_1"]
-    assert body_params(sender.sent[0]) == ["Cesar Ochoa", "034059582302", "CAYENNE PEPPER. CM", "84.900", "ENVIA"]
+    assert sent_names(sender) == ["pedido_enviado_2"]
+    assert body_params(sender.sent[0]) == ["Cesar Ochoa", "034059582302", "CAYENNE PEPPER. CM", "$84.900", "ENVIA"]
     assert sender.sent[0][0] == "573105409038"
 
     details = backend.registered[0]["details"]
@@ -401,7 +402,7 @@ def test_job_every_15_minutes_notifies_each_level_once():
     run(service)
     report = run(service)  # sigue en el nivel 2
 
-    assert sent_names(sender) == ["pedido_enviado_1", "pedido_camino_1"]
+    assert sent_names(sender) == ["pedido_enviado_2", "pedido_camino_1"]
     assert source.order_calls == ["1"]  # el detalle se pidió una sola vez
     assert report.already_notified == 1
     assert backend.tracking_marks == [("G1", 1), ("G1", 2)]
@@ -451,7 +452,7 @@ def test_failed_send_does_not_raise_level_and_is_retried():
     report = run(service)
 
     assert report.notified == {1: 1}
-    assert sent_names(sender) == ["pedido_enviado_1"]
+    assert sent_names(sender) == ["pedido_enviado_2"]
     assert source.order_calls == ["1"]
 
 
@@ -557,13 +558,13 @@ RECIPIENT = RecipientInfo(name="Cesar Ochoa", phone="573105409038", tracking_num
 
 
 def test_pedido_enviado_template():
-    template = PedidoEnviadoTemplate(RECIPIENT, "84.900", "INTERRAPIDISIMO")
+    template = PedidoEnviadoTemplate(RECIPIENT, "$84.900", "INTERRAPIDISIMO")
 
     payload = template.build_payload("573105409038")
 
-    assert payload["template"]["name"] == "pedido_enviado_1"
+    assert payload["template"]["name"] == "pedido_enviado_2"
     assert [p["text"] for p in payload["template"]["components"][0]["parameters"]] == [
-        "Cesar Ochoa", "240063856178", "Collar Girasol", "84.900", "INTERRAPIDISIMO",
+        "Cesar Ochoa", "240063856178", "Collar Girasol", "$84.900", "INTERRAPIDISIMO",
     ]
     assert template.log_message() == (
         "Hola Cesar Ochoa, ¡tu pedido ya está listo para envío! 📦\n"
@@ -852,11 +853,11 @@ def test_level_1_sends_the_product_video_before_pedido_enviado():
 
     report = run(service)
 
-    assert sent_names(sender) == ["video_producto", "pedido_enviado_1"]
+    assert sent_names(sender) == ["video_producto", "pedido_enviado_2"]
     assert videos.calls == [(BUSINESS_ID, ["CAYENNE PEPPER. CM"])]
     assert report.notified == {1: 1}
     assert report.videos == 1
-    # El nivel queda ligado a pedido_enviado_1, no al video.
+    # El nivel queda ligado a pedido_enviado_2, no al video.
     assert backend.tracking_messages == ["wamid.tracking.2"]
     assert [(m["media_type"], m["media_id"]) for m in backend.outgoing] == [("video", "media-cayenne"), ("text", None)]
 
@@ -874,7 +875,7 @@ def test_level_2_does_not_send_the_video():
 
 
 def test_video_is_not_repeated_when_level_1_is_retried():
-    # El video salió pero pedido_enviado_1 falló: el reintento no repite el video.
+    # El video salió pero pedido_enviado_2 falló: el reintento no repite el video.
     source = FakeDropiSource({LEVEL_1_STATUS: [order("1", "G1")]})
     backend = FakeBackend({"G1": stored_guide("G1", video_sent=True)})
     videos = FakeVideos(media_id="media-cayenne")
@@ -882,7 +883,7 @@ def test_video_is_not_repeated_when_level_1_is_retried():
 
     report = run(service)
 
-    assert sent_names(sender) == ["pedido_enviado_1"]
+    assert sent_names(sender) == ["pedido_enviado_2"]
     assert videos.calls == []
     assert report.videos == 0
 
@@ -907,7 +908,7 @@ def test_failed_pedido_enviado_does_not_raise_the_level_even_if_the_video_went_o
     source = FakeDropiSource({LEVEL_1_STATUS: [order("1", "G1")]}, details={"1": order_detail("1", "G1")})
     sender = FakeSender()
     original_send = sender.send_template
-    sender.send_template = lambda to, template: None if template.name == "pedido_enviado_1" else original_send(to, template)
+    sender.send_template = lambda to, template: None if template.name == "pedido_enviado_2" else original_send(to, template)
     service, backend, _ = build_service(source, sender=sender, videos=FakeVideos(media_id="media-cayenne"))
 
     report = run(service)
@@ -915,3 +916,83 @@ def test_failed_pedido_enviado_does_not_raise_the_level_even_if_the_video_went_o
     assert report.errors == ["G1"]
     assert backend.tracking_marks == []
     assert [m["media_type"] for m in backend.outgoing] == ["video"]  # el video sí queda en el historial
+
+
+# ------------------------------ Precio con moneda (pedido_enviado_2) ------------------------------
+
+GUATEMALA = PhoneCountry("502", 8, "GT")
+
+
+def gt_order(order_id, tracking, total=229, currency="GTQ"):
+    gt = {**order(order_id, tracking, phone="51319585", total=total), "currency": currency}
+    if currency is None:
+        del gt["currency"]
+    return gt
+
+
+def test_guatemala_price_goes_with_quetzal_symbol():
+    source = FakeDropiSource({LEVEL_1_STATUS: [gt_order("1", "G1")]}, details={"1": order_detail("1", "G1")})
+    service, _, sender = build_service(source, FakeBackend(country=GUATEMALA))
+
+    run(service)
+
+    assert body_params(sender.sent[0])[3] == "Q229"
+    assert "Precio: *Q229*" in sender.sent[0][2]
+
+
+def test_order_without_currency_uses_the_business_country():
+    detail = {**order_detail("1", "G1")}
+    detail.pop("currency", None)
+    source = FakeDropiSource({LEVEL_1_STATUS: [gt_order("1", "G1", currency=None)]}, details={"1": detail})
+    service, _, sender = build_service(source, FakeBackend(country=GUATEMALA))
+
+    run(service)
+
+    assert body_params(sender.sent[0])[3] == "Q229"
+
+
+def test_order_without_any_currency_is_skipped():
+    # Sin moneda en el pedido ni país conocido: mejor no enviar un precio sin símbolo.
+    detail = {**order_detail("1", "G1")}
+    detail.pop("currency", None)
+    source = FakeDropiSource({LEVEL_1_STATUS: [gt_order("1", "G1", currency=None)]}, details={"1": detail})
+    service, _, sender = build_service(source, FakeBackend(country=PhoneCountry("502", 8)))
+
+    report = run(service)
+
+    assert sender.sent == []
+    assert report.skipped == ["G1"]
+
+
+@pytest.mark.parametrize("amount,currency,expected", [
+    (84900, "COP", "$84.900"),
+    (1250000, "COP", "$1.250.000"),
+    (0, "COP", "$0"),
+    (229, "GTQ", "Q229"),
+    (1250.5, "GTQ", "Q1,250.50"),
+    (344.0, "GTQ", "Q344"),
+    (1250, "USD", "USD 1,250"),
+])
+def test_money_format_per_currency(amount, currency, expected):
+    assert _format_money(amount, currency) == expected
+
+
+def test_backend_client_reads_the_country_code():
+    class Session:
+        def request(self, *args, **kwargs):
+            class Response:
+                status_code = 200
+
+                def raise_for_status(self):
+                    pass
+
+                def json(self):
+                    return {"business": {"country": {"code": "GT", "phone_prefix": "502", "phone_length": 8}}}
+
+            return Response()
+
+    client = RustBackendClient("http://backend", api_key="k")
+    client._token = "token"
+    client._session = Session()
+
+    assert client.get_business_country(2) == GUATEMALA
