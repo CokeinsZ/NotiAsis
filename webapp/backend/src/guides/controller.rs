@@ -7,7 +7,7 @@ use axum::{
 use validator::Validate;
 
 use crate::auth::middleware::{AuthenticatedClaims, require_bot};
-use crate::guides::dtos::{GuideFilters, GuideLookupDto, RegisterGuideDto};
+use crate::guides::dtos::{GuideFilters, GuideLookupDto, MarkNotifiedDto, MarkTrackingDto, RegisterGuideDto};
 use crate::state::GuideState;
 use crate::tools::responses::{build_validation_response, json_response};
 
@@ -127,20 +127,62 @@ async fn lookup_guides(
     }
 }
 
-/// El bot marca la guía como notificada tras enviar las plantillas.
+/// El bot marca la guía como notificada tras enviar las plantillas. El
+/// cuerpo es opcional: `meta_message_id` liga la notificación al mensaje
+/// para deshacerla si Meta reporta que falló. `updated: false` si Meta ya
+/// lo había reportado como fallido (la notificación no se cuenta).
 async fn mark_guide_notified(
     claims: AuthenticatedClaims,
     State(state): State<GuideState>,
     Path(number): Path<String>,
+    body: Option<Json<MarkNotifiedDto>>,
 ) -> (StatusCode, Json<serde_json::Value>) {
     if let Err(response) = require_bot(&claims.0) {
         return response;
     }
-    match state.guide_service.mark_notified(&number).await {
-        Ok(_) => json_response(
+    let body = body.map(|Json(body)| body).unwrap_or_default();
+    if let Err(errors) = body.validate() {
+        return build_validation_response(errors);
+    }
+
+    match state.guide_service.mark_notified(&number, body.meta_message_id.as_deref()).await {
+        Ok(updated) => json_response(
             StatusCode::OK,
             serde_json::json!({
-                "message": format!("Guide {number} marked as notified")
+                "message": format!("Guide {number} marked as notified"),
+                "updated": updated
+            }),
+        ),
+        Err(e) => {
+            let status = if e == "Guide not found" { StatusCode::NOT_FOUND } else { StatusCode::BAD_REQUEST };
+            json_response(status, serde_json::json!({ "message": e }))
+        }
+    }
+}
+
+/// El bot registra la notificación de seguimiento del envío (nivel 1 o 2)
+/// tras enviar la plantilla. El nivel solo sube: `updated: false` si la
+/// guía ya tenía ese nivel o uno mayor (no se vuelve a notificar), o si
+/// Meta ya reportó que el mensaje (`meta_message_id`) falló.
+async fn mark_guide_tracking(
+    claims: AuthenticatedClaims,
+    State(state): State<GuideState>,
+    Path(number): Path<String>,
+    Json(body): Json<MarkTrackingDto>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    if let Err(response) = require_bot(&claims.0) {
+        return response;
+    }
+    if let Err(errors) = body.validate() {
+        return build_validation_response(errors);
+    }
+
+    match state.guide_service.mark_tracking(&number, body.level, body.meta_message_id.as_deref()).await {
+        Ok(updated) => json_response(
+            StatusCode::OK,
+            serde_json::json!({
+                "message": format!("Guide {number} tracking level {}", body.level),
+                "updated": updated
             }),
         ),
         Err(e) => {
@@ -156,6 +198,7 @@ pub fn guide_routes(state: GuideState) -> Router {
         .route("/lookup", post(lookup_guides))
         .route("/{number}", get(get_guide))
         .route("/{number}/notified", post(mark_guide_notified))
+        .route("/{number}/tracking", post(mark_guide_tracking))
         .with_state(state)
 }
 
@@ -193,7 +236,11 @@ mod tests {
             unreachable!()
         }
 
-        async fn mark_notified(&self, _: &str) -> Result<(), String> {
+        async fn mark_notified(&self, _: &str, _: Option<&str>) -> Result<bool, String> {
+            unreachable!()
+        }
+
+        async fn mark_tracking(&self, _: &str, _: i16, _: Option<&str>) -> Result<bool, String> {
             unreachable!()
         }
 
@@ -221,6 +268,7 @@ mod tests {
             ("GET", "/", json!({})),
             ("GET", "/G1", json!({})),
             ("POST", "/G1/notified", json!({})),
+            ("POST", "/G1/tracking", json!({ "level": 1 })),
             ("POST", "/lookup", json!({ "numbers": ["G1"] })),
         ] {
             assert_eq!(status_of(&routes, method, uri, "asociado-7", body).await, StatusCode::FORBIDDEN, "{method} {uri}");

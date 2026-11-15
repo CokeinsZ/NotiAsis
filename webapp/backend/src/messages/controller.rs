@@ -9,7 +9,9 @@ use axum::{
 use validator::Validate;
 
 use crate::auth::middleware::{AuthenticatedClaims, require_bot};
-use crate::messages::dtos::{IncomingMessageDto, OutgoingMessageDto, UpdateMessageStatusDto};
+use crate::messages::dtos::{
+    IncomingMessageDto, OutgoingMessageDto, RegisterMessageErrorDto, UpdateMessageStatusDto,
+};
 use crate::state::MessageState;
 use crate::tools::responses::{build_validation_response, json_response};
 
@@ -99,6 +101,40 @@ async fn update_status(
     }
 }
 
+/// Meta reporta en el webhook que un mensaje enviado falló (estado
+/// 'failed'); el bot lo reenvía aquí con el estado completo. El mensaje
+/// queda en 'failed', el error en messages_errors y, si el mensaje era el
+/// de una notificación de guía, la guía vuelve al paso o nivel anterior
+/// (se reintenta en la próxima corrida del job).
+async fn register_error(
+    claims: AuthenticatedClaims,
+    State(state): State<MessageState>,
+    Path(meta_message_id): Path<String>,
+    Json(body): Json<RegisterMessageErrorDto>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    if let Err(response) = require_bot(&claims.0) {
+        return response;
+    }
+    if let Err(errors) = body.validate() {
+        return build_validation_response(errors);
+    }
+
+    match state.message_service.register_failure(&meta_message_id, body).await {
+        Ok(failure) => json_response(
+            StatusCode::CREATED,
+            serde_json::json!({
+                "message": format!("Message {meta_message_id} failed"),
+                "message_found": failure.message_found,
+                "undone": failure.undone
+            }),
+        ),
+        Err(e) => json_response(
+            StatusCode::BAD_REQUEST,
+            serde_json::json!({ "message": e }),
+        ),
+    }
+}
+
 /// Descarga multimedia de Meta y la reenvía al navegador en memoria
 /// (Content-Disposition: inline para que se visualice/reproduzca en la
 /// página en vez de descargarse). Nada se guarda en el servidor.
@@ -148,6 +184,7 @@ pub fn message_routes(state: MessageState) -> Router {
         .route("/outgoing", post(register_outgoing))
         .route("/media/{media_id}", get(get_media))
         .route("/{meta_message_id}/status", patch(update_status))
+        .route("/{meta_message_id}/errors", post(register_error))
         .with_state(state)
 }
 
@@ -165,7 +202,9 @@ mod tests {
 
     use crate::auth::dtos::{ApiKeyLoginDto, ChangePasswordDto, Claims, LoginDto, TokenResponse};
     use crate::auth::service::AuthServiceTrait;
-    use crate::messages::dtos::{MediaType, Message, MessageStatus, SendMessageDto};
+    use crate::messages::dtos::{
+        MediaType, Message, MessageFailure, MessageStatus, SendMessageDto, UndoneNotification,
+    };
     use crate::messages::service::MessageServiceTrait;
     use crate::state::AppState;
 
@@ -272,6 +311,21 @@ mod tests {
 
         async fn update_status(&self, _: &str, _: MessageStatus) -> Result<(), String> {
             Ok(())
+        }
+
+        async fn register_failure(
+            &self,
+            _: &str,
+            _: RegisterMessageErrorDto,
+        ) -> Result<MessageFailure, String> {
+            Ok(MessageFailure {
+                message_found: true,
+                undone: vec![UndoneNotification {
+                    guide_number: Some("G1".into()),
+                    kind: "tracking".into(),
+                    notification_step: 2,
+                }],
+            })
         }
 
         async fn fetch_media(&self, media_id: &str) -> Result<(String, Vec<u8>), String> {
@@ -446,6 +500,22 @@ mod tests {
         assert_eq!(call("PATCH", "/wamid.y/status", "valido", serde_json::json!({"status": "read"})).await,
                    StatusCode::FORBIDDEN);
         assert_eq!(call("POST", "/outgoing", "bot", outgoing).await, StatusCode::CREATED);
+    }
+
+    #[tokio::test]
+    async fn only_the_bot_registers_message_errors() {
+        let error = serde_json::json!({
+            "error_code": 131048,
+            "error_title": "Spam Rate limit hit",
+            "payload": { "id": "wamid.y", "status": "failed", "errors": [{ "code": 131048 }] }
+        });
+
+        assert_eq!(call("POST", "/wamid.y/errors", "valido", error.clone()).await, StatusCode::FORBIDDEN);
+        assert_eq!(call("POST", "/wamid.y/errors", "bot", error).await, StatusCode::CREATED);
+        assert_eq!(
+            call("POST", "/wamid.y/errors", "bot", serde_json::json!({ "payload": "failed" })).await,
+            StatusCode::BAD_REQUEST
+        );
     }
 
     #[tokio::test]

@@ -12,6 +12,7 @@ from datetime import date
 from typing import TYPE_CHECKING
 
 from app.core.phones import PhoneCountry
+from app.models.quota import QuotaReservation
 from app.models.shipping import RecipientInfo
 
 if TYPE_CHECKING:
@@ -143,8 +144,11 @@ class NotificationBackend(ABC):
         `details` son los datos del pedido (cliente y productos); el
         backend los guarda aunque la guía ya existiera.
 
-        Retorna True si la guía es nueva (hay que notificar) o si el
-        backend no responde (fail-open); False si ya fue registrada.
+        Retorna True si la guía es nueva (hay que notificar); False si ya
+        fue registrada, si el backend la rechaza por datos inválidos o si no
+        responde. En los dos últimos casos no se notifica: sin la guía
+        registrada la notificación no se puede marcar y se repetiría en cada
+        corrida (mejor perderla que notificar duplicado).
         """
 
     @abstractmethod
@@ -172,8 +176,19 @@ class NotificationBackend(ABC):
         office_id, delivered_id). None si no existe o el backend falla."""
 
     @abstractmethod
-    def mark_guide_notified(self, number: str) -> None:
-        """Marca la guía como notificada al destinatario."""
+    def mark_guide_notified(self, number: str, meta_message_id: str | None = None) -> None:
+        """Marca la guía como notificada al destinatario.
+
+        `meta_message_id` es el mensaje principal de la notificación: si
+        Meta reporta después que falló, el backend la deshace y la guía se
+        reintenta en la próxima corrida."""
+
+    @abstractmethod
+    def mark_guide_tracking(self, number: str, level: int, meta_message_id: str | None = None) -> None:
+        """Registra que la guía recibió la notificación de seguimiento del
+        envío del nivel `level` (1 o 2). El backend solo sube el nivel y no
+        toca `notification_count` (el del nivel 3, reclame en oficina).
+        `meta_message_id` como en `mark_guide_notified`."""
 
     @abstractmethod
     def register_incoming_message(
@@ -214,3 +229,32 @@ class NotificationBackend(ABC):
     @abstractmethod
     def update_message_status(self, meta_message_id: str, status: str) -> None:
         """Actualiza el estado (sent/delivered/read) de un mensaje saliente."""
+
+    @abstractmethod
+    def register_message_error(
+        self,
+        meta_message_id: str,
+        error_code: int | None,
+        error_title: str | None,
+        payload: dict,
+    ) -> None:
+        """Meta reportó que un mensaje enviado falló (estado 'failed').
+
+        El backend guarda el error con el estado completo (`payload`), deja
+        el mensaje en 'failed' y deshace la notificación de guía ligada a
+        él. No se reintenta aquí: lo hace la próxima corrida del job."""
+
+    @abstractmethod
+    def reserve_quota(
+        self, phones: list[str], kind: str, business_id: int, ttl_minutes: int
+    ) -> QuotaReservation | None:
+        """Pide cupo de mensajería (clientes nuevos en 24 h, límite de Meta)
+        para los teléfonos de una corrida, en orden de prioridad. El backend
+        aprueba los que no consumen cupo y los nuevos que quepan, y deja
+        reservados los aprobados por `ttl_minutes`. None si el backend no
+        responde: entonces no se envía (pasarse del límite hace que Meta
+        rechace los mensajes)."""
+
+    @abstractmethod
+    def release_quota(self, reservation_id: int) -> None:
+        """Libera la reserva de cupo al terminar la corrida."""

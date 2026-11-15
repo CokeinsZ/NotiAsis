@@ -180,6 +180,13 @@ ALTER TABLE guides ADD COLUMN IF NOT EXISTS shipping_company VARCHAR(128);
 ALTER TABLE guides ADD COLUMN IF NOT EXISTS order_total NUMERIC(14, 2);
 ALTER TABLE guides ADD COLUMN IF NOT EXISTS currency VARCHAR(8);
 
+-- Seguimiento del envío de pedidos de Dropi (POST /notify-dropi-tracking
+-- del bot): nivel más alto ya notificado (0 ninguno, 1 pedido_enviado_1,
+-- 2 pedido_camino_1). Cada nivel se notifica una sola vez y el nivel
+-- nunca baja. El nivel 3 (reclame en oficina) usa notification_count.
+ALTER TABLE guides ADD COLUMN IF NOT EXISTS tracking_level SMALLINT NOT NULL DEFAULT 0;
+ALTER TABLE guides ADD COLUMN IF NOT EXISTS tracking_notified_at TIMESTAMP;
+
 CREATE TABLE IF NOT EXISTS guide_products (
 	id SERIAL PRIMARY KEY,
 	guide_number VARCHAR(20) NOT NULL,
@@ -233,10 +240,75 @@ CREATE TABLE IF NOT EXISTS guide_notifications (
 		ON UPDATE CASCADE
 );
 
+-- Tipo de notificación (dashboard): 'office' es la escalación de la guía
+-- (notification_step = notification_count: 1 inicial, 2 recordatorio,
+-- 3 final, 4+ diario); 'tracking' es el seguimiento del envío de Dropi
+-- (notification_step = nivel: 1 pedido_enviado_1, 2 pedido_camino_1).
+ALTER TABLE guide_notifications ADD COLUMN IF NOT EXISTS kind VARCHAR(16) NOT NULL DEFAULT 'office';
+
+-- Mensaje principal de la notificación (wamid). Meta acepta el envío y
+-- avisa después por webhook si falló: entonces la notificación se borra y
+-- la guía vuelve al paso o nivel anterior (se reintenta en la próxima
+-- corrida del job). NULL en las notificaciones anteriores a este cambio.
+ALTER TABLE guide_notifications ADD COLUMN IF NOT EXISTS meta_message_id VARCHAR(255);
+
+-- Estado de un mensaje que Meta aceptó pero no pudo entregar (webhook
+-- con status 'failed'). El detalle queda en messages_errors.
+ALTER TYPE message_status_enum ADD VALUE IF NOT EXISTS 'failed';
+
+-- Errores que Meta reporta de los mensajes enviados. Sin llave foránea a
+-- messages a propósito: el webhook del error puede llegar antes de que el
+-- bot registre el mensaje (y un mensaje rechazado por el backend no queda
+-- registrado, pero su error sí).
+CREATE TABLE IF NOT EXISTS messages_errors (
+	id SERIAL PRIMARY KEY,
+	meta_message_id VARCHAR(255) UNIQUE NOT NULL,
+	error_code INT,                 -- ej. 131048
+	error_title VARCHAR(255),       -- ej. 'Spam Rate limit hit'
+	payload JSONB NOT NULL,         -- el estado completo que envió Meta
+	created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+-- Cupo de clientes nuevos por 24 h (límite de mensajería de Meta, del
+-- número de WhatsApp: lo comparten todos los business). Antes de enviar,
+-- cada corrida del bot reserva los teléfonos a los que va a escribir
+-- (POST /quota/reservations) y los libera al terminar; si no los libera,
+-- vencen en expires_at. Un teléfono reservado ocupa un cupo hasta que su
+-- mensaje queda registrado en messages (desde ahí cuenta por el mensaje).
+CREATE TABLE IF NOT EXISTS message_quota_reservations (
+	id SERIAL PRIMARY KEY,
+	kind VARCHAR(16) NOT NULL,      -- 'office' (prioridad) o 'tracking' (con tope propio)
+	business_id INT,                -- quién reservó (solo auditoría)
+	created_at TIMESTAMP NOT NULL,  -- UTC
+	expires_at TIMESTAMP NOT NULL,  -- UTC
+	released_at TIMESTAMP,          -- UTC; NULL mientras esté vigente
+
+	FOREIGN KEY (business_id) REFERENCES businesses(id)
+		ON DELETE SET NULL
+		ON UPDATE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS message_quota_reservation_phones (
+	reservation_id INT NOT NULL,
+	user_id VARCHAR(20) NOT NULL,   -- teléfono normalizado, como messages.user_id
+
+	PRIMARY KEY (reservation_id, user_id),
+	FOREIGN KEY (reservation_id) REFERENCES message_quota_reservations(id)
+		ON DELETE CASCADE
+);
+
 CREATE INDEX IF NOT EXISTS idx_messages_chat_time ON messages (business_id, user_id, created_at DESC);
+-- Cálculo del cupo: salientes de las últimas 24 h y mensajes del cliente
+-- (abren su ventana de atención de 24 h).
+CREATE INDEX IF NOT EXISTS idx_messages_outgoing_time ON messages (created_at) WHERE NOT from_user;
+CREATE INDEX IF NOT EXISTS idx_messages_incoming_user_time ON messages (user_id, created_at) WHERE from_user;
+CREATE INDEX IF NOT EXISTS idx_quota_reservations_active ON message_quota_reservations (expires_at) WHERE released_at IS NULL;
 -- Autorizar la descarga de multimedia: el media_id debe ser de un mensaje del business.
 CREATE INDEX IF NOT EXISTS idx_messages_media ON messages (media_id) WHERE media_id IS NOT NULL;
+-- Si la guía ya recibió el video del producto (POST /guides/lookup, video_sent).
+CREATE INDEX IF NOT EXISTS idx_messages_guide ON messages (guide_number) WHERE guide_number IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_chats_business_activity ON chats (business_id, last_user_message_timestamp DESC);
 CREATE INDEX IF NOT EXISTS idx_guide_notifications_business_date ON guide_notifications (business_id, (created_at::date));
 CREATE INDEX IF NOT EXISTS idx_guide_notifications_guide ON guide_notifications (guide_number);
+CREATE INDEX IF NOT EXISTS idx_guide_notifications_message ON guide_notifications (meta_message_id) WHERE meta_message_id IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_guide_products_guide ON guide_products (guide_number);

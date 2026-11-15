@@ -47,13 +47,15 @@ app/
 │   ├── google_sheets.py     # Descarga de hojas de Google Sheets (polars)
 │   ├── sheet_notifier.py    # Notificación masiva desde el Google Sheet
 │   ├── dropi_client.py      # Cliente de los webhooks de N8N (MCP de Dropi)
+│   ├── dropi_orders.py      # Base común de las notificaciones de Dropi
 │   ├── dropi_notifier.py    # Notificación de pedidos de Dropi en oficina
+│   ├── dropi_tracking_notifier.py  # Seguimiento del envío de Dropi por niveles
 │   ├── product_videos.py    # Video de cada producto y caché de su media_id
 │   └── associate_directory.py  # Asociados autorizados en RAM (cargados del backend)
 └── api/
     ├── dependencies.py      # Composition root (inyección de dependencias)
     ├── notify_sheet.py      # POST /notify-sheet (notificación masiva)
-    ├── notify_dropi.py      # POST /notify-dropi-mcp (pedidos de Dropi)
+    ├── notify_dropi.py      # POST /notify-dropi-mcp y /notify-dropi-tracking (Dropi)
     └── webhook.py           # Router FastAPI (GET/POST /webhook)
 tests/                       # Tests del bot (pytest, sin servicios externos)
 ```
@@ -86,9 +88,29 @@ El bot consume la API del backend (`BACKEND_API_URL`):
      respondiendo.
 - **Teléfonos sin indicativo** (Dropi, Google Sheet, PDF): se completan
   con el país del business (`countries.phone_prefix` y `phone_length`,
-  que el bot lee de `GET /businesses/{id}`).
+  que el bot lee de `GET /businesses/{id}`). Un teléfono con otra
+  longitud (mal digitado) queda tal cual. El backend acepta de 8 a 15
+  dígitos en guías, mensajes y asociados; si aun así rechaza una guía
+  (4xx), el bot no la notifica, porque sin la guía registrada la
+  notificación no se puede marcar y se repetiría en cada corrida.
 - **Estados que reporta Meta** (sent/delivered/read):
   `PATCH /messages/{meta_message_id}/status`.
+- **Mensajes que Meta acepta pero no entrega** (webhook con estado
+  `failed`, ej. 131048 *Spam Rate limit hit* al pasar el límite diario):
+  `POST /messages/{meta_message_id}/errors` con el estado completo de
+  Meta. El backend guarda el error en `messages_errors`, deja el mensaje
+  en `failed` (en el chat sale "No entregado") y, si era el mensaje de
+  una notificación de guía, la borra de `guide_notifications` y devuelve
+  la guía al paso de oficina o nivel de seguimiento anterior. No se
+  reintenta en el momento: la próxima corrida del job la vuelve a
+  enviar. Excepción: el error 131026 (número sin WhatsApp o que no
+  puede recibir) no deshace la notificación, porque reenviarla fallaría
+  en cada corrida. Por eso el bot marca cada notificación con el `meta_message_id`
+  de su mensaje principal (`mensaje_guia_es` en la inicial; el video
+  solo no la deshace). El aviso de Meta llega entre 1 y 20 segundos
+  después del envío y puede ganarle a la marca del bot: un bloqueo por
+  mensaje en Postgres hace que el mensaje nazca `failed` y la marca no
+  avance si el error llegó primero.
 
 Todos los teléfonos se normalizan sin '+' en ambos servicios antes de
 guardarse o compararse (los números de 10 dígitos, como los del Google
@@ -123,6 +145,17 @@ por WhatsApp o del business cuya hoja se procesó).
 dueño) devuelve las notificaciones por día y tipo. La webapp lo muestra en
 `/chats/{businessId}/dashboard` (icono de gráfica junto al nombre del
 business): barras apiladas por día con selector de 7/30/90 días.
+
+Cada fila trae `kind` y `notification_count` (tabla `guide_notifications`):
+
+| `kind` | `notification_count` | En el dashboard |
+|---|---|---|
+| `tracking` | 1 | Pedido enviado (`pedido_enviado_2`) |
+| `tracking` | 2 | Pedido en camino (`pedido_camino_1`) |
+| `office` | 1 | Oficina inicial |
+| `office` | 2 | Recordatorio |
+| `office` | 3 | Recordatorio final |
+| `office` | 4+ | Seguimiento diario (`pedido_oficina`) |
 
 ### Notificación masiva desde Google Sheet
 
@@ -188,7 +221,7 @@ consultas a `/orden`) se imprime en los logs del bot al terminar.
 
    | Notificación (`notification_count` actual) | Se envía |
    |---|---|
-   | Día 1 (0) | `video_producto` (si el producto tiene video) + `mensaje_guia_es` |
+   | Día 1 (0) | `video_producto` (si el producto tiene video y la guía no lo recibió en el seguimiento) + `mensaje_guia_es` |
    | Día 2 (1) | `recordatorio` |
    | Día 3 (2) | `recordatorio_final` |
    | Día 4 en adelante (3 o más) | `pedido_oficina` |
@@ -249,6 +282,131 @@ Migración: volver a correr `webapp/backend/db.sql` sobre la base
 existente (es idempotente) agrega las columnas de pedido a `guides` y la
 tabla `guide_products` (y le quita `unit_price` y `subtotal` si se
 habían creado).
+
+### Seguimiento del envío de pedidos de Dropi (por niveles)
+
+`POST /notify-dropi-tracking?business_id=N` notifica el avance del pedido
+**antes** de que llegue a la oficina. Pensado para un job cada 15 minutos.
+Mismas reglas que `/notify-dropi-mcp`: responde 202 y procesa en segundo
+plano, el `business_id` es obligatorio (404 si no existe), el body
+opcional es el mismo (`from` por defecto hace 15 días, `until`,
+`result_number`, `start`) y responde 409 mientras haya otra corrida de
+seguimiento del mismo business. Tiene su propio control de corridas: no
+bloquea a `/notify-dropi-mcp` ni queda bloqueado por él.
+
+```bash
+curl -X POST "localhost:8000/notify-dropi-tracking?business_id=1"
+```
+
+| Nivel | Estados de Dropi | Plantilla |
+|---|---|---|
+| 1 | `GUIA_GENERADA`, `PREPARADO PARA TRANSPORTADORA`, `ENTREGADO A TRANSPORTADORA`, `ADMITIDA`, `RECOLECTADO` | `video_producto` (si el producto tiene video) + `pedido_enviado_2` (nombre, guía, producto, precio con el símbolo de su moneda —`$84.900`, `Q229`—, transportadora) |
+| 2 | `EN TRANSPORTE`, `EN REPARTO`, `DESPACHADA`, `EN DESPACHO`, `EN RUTA` | `pedido_camino_1` (nombre, producto, guía, dirección y ciudad de entrega) |
+| 3 | `RECLAME EN OFICINA` | lo maneja `/notify-dropi-mcp` |
+
+El video del producto va **una sola vez por guía**: con `pedido_enviado_2`
+en el nivel 1 o, si la guía no pasó por ese nivel, con el aviso inicial en
+oficina. El backend lo sabe por el historial (`video_sent` en
+`/guides/lookup`: un video saliente de la guía que no falló; si Meta lo
+rechazó, se vuelve a enviar). Un video rechazado no deshace el nivel: este
+va ligado a `pedido_enviado_2`. Los dos endpoints comparten la misma
+biblioteca de videos (un solo caché de `media_id`).
+
+Los estados viven en `TRACKING_LEVELS`
+(`app/services/dropi_tracking_notifier.py`) y se escriben exactamente como
+en Dropi: el genérico es `GUIA_GENERADA` (con guion bajo); `GUIA GENERADA`
+es un estado de SUPPLI-EXPRESS y no trae pedidos de las demás.
+
+1. `/ordenes` acepta un solo estado por consulta: por cada estado de cada
+   nivel se pagina igual que en `/notify-dropi-mcp` (mientras
+   `count == result_number`, `start += count`). Un pedido que cambió de
+   estado entre dos consultas cuenta en su nivel más alto.
+2. Consulta en lote al backend (`POST /guides/lookup`) el nivel ya
+   notificado de cada guía (`tracking_level`) y sus datos de pedido.
+3. **Una notificación por nivel por guía, y los niveles nunca
+   retroceden**: se envía solo si el nivel del pedido es mayor que el ya
+   notificado. Un pedido que se ve por primera vez en el nivel 2 recibe
+   solo `pedido_camino_1`; uno que vuelve a un estado del nivel 1 no
+   recibe nada; uno ya notificado en oficina (`notification_count > 0`,
+   por Dropi, PDF o Google Sheet) no recibe ninguna de estas.
+4. Tras enviar la plantilla, `POST /guides/{number}/tracking` sube el
+   nivel. Si el envío falla el nivel no sube y se reintenta en la próxima
+   corrida. No toca `notification_count`: la notificación en oficina
+   empieza igual por `mensaje_guia_es`. Cada subida de nivel queda en
+   `guide_notifications` (`kind = 'tracking'`) y sale en el dashboard
+   como "Pedido enviado" / "Pedido en camino".
+
+El detalle del pedido (`/orden`) se pide una sola vez, la primera vez
+que se ve el pedido, y se guarda con la guía: el nivel 2 y la
+notificación en oficina (`/notify-dropi-mcp`) ya no lo vuelven a pedir.
+El valor a pagar es `0` si la tarifa es `SIN RECAUDO`.
+
+La primera corrida notifica todos los pedidos que ya estén en el nivel 1
+o 2 dentro del rango de fechas; para empezar con menos, enviar un `from`
+reciente.
+
+Despliegue, en este orden: 1) correr `webapp/backend/db.sql` (agrega
+`tracking_level` y `tracking_notified_at` a `guides`, `kind` y
+`meta_message_id` a `guide_notifications`, el estado `failed` a
+`message_status_enum` y la tabla `messages_errors`), 2) desplegar el
+backend y el frontend (el backend anterior no sabe leer mensajes en
+`failed`), 3) desplegar el bot. Las tablas `message_quota_reservations` y
+`message_quota_reservation_phones` y los índices del cupo también salen de
+`db.sql`; el bot nuevo necesita el backend nuevo (sin `/quota` no envía). Si el backend no devuelve `tracking_level`, la
+corrida no envía nada (registra el error en los logs) para no repetir
+notificaciones.
+
+### Cupo de mensajes (límite de mensajería de Meta)
+
+Meta limita cuántos clientes **únicos** pueden recibir plantillas en una
+**ventana móvil de 24 h** (250 sin verificar el negocio; la cuenta es del
+número de WhatsApp, así que los business la comparten). Los clientes que
+nos escribieron en las últimas 24 h (ventana de atención abierta) no
+consumen cupo. Pasarse da errores como 131048 *Spam Rate limit hit*.
+
+Antes de enviar, cada corrida automática del bot (oficina de Dropi,
+seguimiento de Dropi y Google Sheet) reserva el cupo de sus clientes en
+una sola llamada, en orden de prioridad:
+
+```
+POST /quota/reservations  {"phones": ["573001112233", ...], "kind": "office", "business_id": 1, "ttl_minutes": 60}
+→ {"approved": false, "approved_phones": [...], "denied_phones": [...], "new_clients": 40,
+   "reservation_id": 12, "expires_at": "...", "available": 23, "limit": 230, "tracking_limit": 80,
+   "used": 190, "reserved": 17, "tracking_used": 45, "tracking_reserved": 0}
+DELETE /quota/reservations/12   (al terminar la corrida)
+GET /quota                      (cupo actual, sin reservar)
+```
+
+- El backend clasifica cada teléfono: **ya ocupa cupo** (le escribimos en
+  las últimas 24 h, mensaje no fallido y fuera de su ventana de atención),
+  **ventana abierta** (nos escribió en las últimas 24 h y sigue abierta
+  hasta que vence la reserva), **reservado por otra corrida**, o **nuevo**.
+  Los tres primeros se aprueban siempre; los nuevos, en el orden pedido
+  mientras quepan (la aprobación puede ser parcial).
+- **Oficina tiene prioridad**: puede usar todo el cupo (`MESSAGING_LIMIT`,
+  230 por defecto). El seguimiento además tiene un tope propio dentro del
+  cupo (`MESSAGING_TRACKING_LIMIT`, 80 por defecto): clientes con una
+  notificación de seguimiento en las últimas 24 h. Así el seguimiento de la
+  mañana nunca se gasta el cupo de la notificación de oficina.
+- La reserva guarda los **teléfonos**, no un número: un cliente cuenta una
+  sola vez aunque esté en dos corridas a la vez o ya tenga su mensaje
+  registrado (desde ahí cuenta por el mensaje). Al terminar la corrida se
+  libera; si el bot se cae, vence en `ttl_minutes` (el bot usa 60).
+- Atómico: la situación de todos los teléfonos y los totales salen de una
+  sola consulta, y calcular y reservar pasan en una transacción con un
+  bloqueo global (`pg_advisory_xact_lock`): dos corridas simultáneas nunca
+  ven el mismo cupo libre. Si el bloqueo no se obtiene en 10 s, responde
+  503 y el bot reintenta (3 intentos).
+- En el bot (`RunQuota`, `app/services/quota.py`): cada corrida planea a
+  quién le escribe, reserva, envía solo a los aprobados y libera al final.
+  Los que no caben quedan en `deferred` del reporte ("sin cupo"): no se
+  envían ni se marcan, así que la próxima corrida los reintenta. Sin cupo
+  tampoco se consulta el detalle del pedido a Dropi ni se descarga el PDF.
+  Prioridad dentro de una corrida de oficina: primero los avisos iniciales,
+  después los recordatorios. Si el backend no responde, no se envía.
+- El PDF que manda un asociado por WhatsApp no pide cupo: es un envío
+  manual a un solo cliente y no tiene una corrida que lo reintente (igual
+  cuenta en `used` una vez registrado).
 
 ## Agregar una nueva plantilla de WhatsApp
 
@@ -437,10 +595,15 @@ Solo para el bot (token de api_key; un asociado recibe 403) y la administración
 | GET | `/associates/phones` | Números autorizados (reemplaza `ALLOWED_SENDER_NUMBERS`) |
 | POST | `/messages/incoming` | Registrar mensaje entrante del webhook. `reply_to_meta_message_id` opcional: el mensaje que el cliente citó |
 | POST | `/messages/outgoing` | Registrar plantilla enviada, con la guía que notifica (`guide_number`) |
-| PATCH | `/messages/{meta_message_id}/status` | Actualizar estado (`sent`/`delivered`/`read`) |
+| PATCH | `/messages/{meta_message_id}/status` | Actualizar estado (`sent`/`delivered`/`read`; nunca cambia un `failed`) |
+| POST | `/messages/{meta_message_id}/errors` | `{"error_code", "error_title", "payload"}`: Meta reportó que el mensaje falló. Lo deja en `failed`, guarda el error y deshace la notificación de guía ligada a él (`undone`). Idempotente |
 | POST | `/guides` | Registrar guía; responde `created: false` si es duplicada (no re-notificar). `details` opcional (cliente y productos del pedido) se guarda aunque la guía ya existiera |
-| POST | `/guides/lookup` | `{"numbers": [...]}` (máx. 500) → guías existentes con `notification_count`, `details` y `products` |
-| POST | `/guides/{number}/notified` | Marcar cuándo se notificó la guía |
+| POST | `/guides/lookup` | `{"numbers": [...]}` (máx. 500) → guías existentes con `notification_count`, `details`, `products` y `video_sent` (ya recibió el video del producto) |
+| GET | `/quota` | Cupo de clientes nuevos en 24 h: `limit`, `tracking_limit`, `used`, `reserved`, `tracking_used`, `tracking_reserved`, `available_office`, `available_tracking` |
+| POST | `/quota/reservations` | `{"phones", "kind": "office"\|"tracking", "business_id"?, "ttl_minutes"?}`: aprueba (y reserva) los teléfonos que caben en el cupo (`approved_phones`/`denied_phones`, en el orden pedido). 503 si el cupo está bloqueado por otra reserva |
+| DELETE | `/quota/reservations/{id}` | Liberar la reserva al terminar el envío (`released: false` si ya estaba liberada; 404 si no existe) |
+| POST | `/guides/{number}/notified` | Contar una notificación de oficina. Cuerpo opcional `{"meta_message_id"}`: el mensaje principal (`updated: false` si Meta ya lo reportó como fallido) |
+| POST | `/guides/{number}/tracking` | `{"level": 1\|2, "meta_message_id"}`: nivel de seguimiento del envío notificado. Solo sube (`updated: false` si ya tenía ese nivel o uno mayor, o si el mensaje ya falló); 404 si la guía no existe |
 
 La sesión usa JWT en `localStorage` (15 min, renovado automáticamente al
 enviar mensajes libres). Pendiente: refresh tokens y cookies httpOnly para

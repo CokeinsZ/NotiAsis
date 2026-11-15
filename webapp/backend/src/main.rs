@@ -7,6 +7,7 @@ mod businesses;
 mod chats;
 mod guides;
 mod messages;
+mod quota;
 mod state;
 mod tools;
 mod users;
@@ -18,10 +19,19 @@ use chats::controller::chat_routes;
 use guides::controller::guide_routes;
 use messages::controller::message_routes;
 use messages::meta_client::MetaClientTrait;
-use state::{AppState, AssociateAdminState, AuthState, BusinessState, ChatState, GuideState, MessageState, UserState};
+use quota::controller::quota_routes;
+use state::{
+    AppState, AssociateAdminState, AuthState, BusinessState, ChatState, GuideState, MessageState, QuotaState,
+    UserState,
+};
 use users::controller::user_routes;
 
-fn build_app(pool: sqlx::PgPool, meta_client: Arc<dyn MetaClientTrait>, jwt_secret: String) -> Router {
+fn build_app(
+    pool: sqlx::PgPool,
+    meta_client: Arc<dyn MetaClientTrait>,
+    jwt_secret: String,
+    quota_limits: quota::dtos::QuotaLimits,
+) -> Router {
     let app_state_pointer = Arc::new(AppState { });
 
     // Repositorios (comparten el pool de conexiones)
@@ -31,6 +41,7 @@ fn build_app(pool: sqlx::PgPool, meta_client: Arc<dyn MetaClientTrait>, jwt_secr
     let chat_repository = Arc::new(chats::repository::PostgresChatRepository::new(pool.clone()));
     let message_repository = Arc::new(messages::repository::PostgresMessageRepository::new(pool.clone()));
     let guide_repository = Arc::new(guides::repository::PostgresGuideRepository::new(pool.clone()));
+    let quota_repository = Arc::new(quota::repository::PostgresQuotaRepository::new(pool.clone()));
 
     // Servicios
     let auth_service: Arc<dyn AuthServiceTrait> =
@@ -83,6 +94,10 @@ fn build_app(pool: sqlx::PgPool, meta_client: Arc<dyn MetaClientTrait>, jwt_secr
         guide_service,
         global_state: app_state_pointer.clone(),
     };
+    let quota_state = QuotaState {
+        quota_service: Arc::new(quota::service::QuotaService::new(quota_repository, quota_limits)),
+        global_state: app_state_pointer.clone(),
+    };
 
     // Rutas de asociados: consulta (BusinessState) + administración (AssociateAdminState)
     let associates_router = associate_routes(business_state.clone())
@@ -96,6 +111,7 @@ fn build_app(pool: sqlx::PgPool, meta_client: Arc<dyn MetaClientTrait>, jwt_secr
         .nest("/chats", chat_routes(chat_state))
         .nest("/messages", message_routes(message_state))
         .nest("/guides", guide_routes(guide_state))
+        .nest("/quota", quota_routes(quota_state))
         .layer(middleware::from_fn_with_state(
             auth_service,
             auth::middleware::require_auth,
@@ -104,6 +120,19 @@ fn build_app(pool: sqlx::PgPool, meta_client: Arc<dyn MetaClientTrait>, jwt_secr
     Router::new()
         .nest("/auth", auth_routes(auth_state))
         .merge(protected)
+}
+
+/// Entero positivo de una variable de entorno, o `default` si no está.
+fn positive_env(name: &str, default: i64) -> i64 {
+    match std::env::var(name) {
+        Ok(value) => value
+            .trim()
+            .parse::<i64>()
+            .ok()
+            .filter(|value| *value > 0)
+            .unwrap_or_else(|| panic!("{name} must be a positive integer")),
+        Err(_) => default,
+    }
 }
 
 #[tokio::main]
@@ -129,7 +158,19 @@ async fn main() {
 
     let jwt_secret = std::env::var("JWT_SECRET").expect("JWT_SECRET must be set");
 
-    let app = build_app(pool, meta_client, jwt_secret);
+    // Clientes nuevos permitidos en 24 h (límite de mensajería de Meta,
+    // con margen; subirlo cuando Meta suba el nivel del número) y cuántos
+    // de ellos puede usar el seguimiento (el resto es para oficina).
+    let quota_limits = quota::dtos::QuotaLimits {
+        limit: positive_env("MESSAGING_LIMIT", quota::dtos::DEFAULT_MESSAGING_LIMIT),
+        tracking_limit: positive_env("MESSAGING_TRACKING_LIMIT", quota::dtos::DEFAULT_TRACKING_LIMIT),
+    };
+    println!(
+        "Messaging limit: {} new clients per 24h ({} for tracking)",
+        quota_limits.limit, quota_limits.tracking_limit
+    );
+
+    let app = build_app(pool, meta_client, jwt_secret, quota_limits);
 
     let port = std::env::var("PORT").unwrap_or_else(|_| "3000".into());
     let listener = tokio::net::TcpListener::bind(format!("0.0.0.0:{port}"))
@@ -161,7 +202,12 @@ mod tests {
             messages::meta_client::MetaClient::new("dummy".into(), "dummy".into())
         );
 
-        build_app(pool, meta_client, "test-secret".into())
+        build_app(
+            pool,
+            meta_client,
+            "test-secret".into(),
+            quota::dtos::QuotaLimits { limit: 230, tracking_limit: 80 },
+        )
     }
 
     #[tokio::test]
@@ -180,6 +226,7 @@ mod tests {
             "/associates",
             "/guides",
             "/messages/incoming",
+            "/quota",
         ] {
             let response = create_app_without_db()
                 .oneshot(Request::builder().uri(uri).method("GET").body(Body::empty()).unwrap())

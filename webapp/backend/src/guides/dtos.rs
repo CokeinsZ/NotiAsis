@@ -1,14 +1,9 @@
 use chrono::NaiveDateTime;
-use once_cell::sync::Lazy;
-use regex::Regex;
 use serde::{Deserialize, Serialize};
 use validator::Validate;
 
 use crate::tools::custom_validators::validate_non_blank;
-
-static PHONE_REGEX: Lazy<Regex> = Lazy::new(|| {
-    Regex::new(r"^\+?\d{10,15}$").unwrap()
-});
+use crate::tools::phones::PHONE_REGEX;
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[derive(sqlx::FromRow)]
@@ -18,6 +13,10 @@ pub struct Guide {
     pub business_id: i32,
     pub last_notification_timestamp: Option<NaiveDateTime>,
     pub notification_count: i32,
+    /// Nivel de seguimiento del envío más alto ya notificado (0 = ninguno,
+    /// 1 = pedido_enviado_1, 2 = pedido_camino_1). Solo sube.
+    pub tracking_level: i16,
+    pub tracking_notified_at: Option<NaiveDateTime>,
 }
 
 /// El bot registra aquí cada guía recibida. Si el número de guía ya
@@ -27,7 +26,7 @@ pub struct RegisterGuideDto {
     #[validate(custom(function = "validate_non_blank"), length(min = 1, max = 20, message = "El número de guía debe tener entre 1 y 20 caracteres"))]
     pub number: String,
 
-    #[validate(regex(path = *PHONE_REGEX, message = "El teléfono debe tener entre 10 y 15 dígitos, con '+' opcional"))]
+    #[validate(regex(path = *PHONE_REGEX, message = "El teléfono debe tener entre 8 y 15 dígitos, con '+' opcional"))]
     pub user_phone: String,
 
     #[validate(length(max = 255))]
@@ -101,6 +100,30 @@ pub struct GuideLookupDto {
     pub numbers: Vec<String>,
 }
 
+/// El bot registra la notificación de seguimiento del envío de un pedido
+/// de Dropi (el nivel 3, reclame en oficina, usa `notification_count`).
+#[derive(Debug, Serialize, Deserialize, Validate)]
+pub struct MarkTrackingDto {
+    #[validate(range(min = 1, max = 2, message = "El nivel de seguimiento debe ser 1 o 2"))]
+    pub level: i16,
+
+    /// wamid de la plantilla enviada. Si Meta reporta que falló, el nivel
+    /// se deshace (POST /messages/{id}/errors).
+    #[serde(default)]
+    #[validate(length(min = 1, max = 255))]
+    pub meta_message_id: Option<String>,
+}
+
+/// Cuerpo (opcional) de POST /guides/{number}/notified.
+#[derive(Debug, Default, Serialize, Deserialize, Validate)]
+pub struct MarkNotifiedDto {
+    /// wamid del mensaje principal de la notificación. Si Meta reporta que
+    /// falló, el paso se deshace (POST /messages/{id}/errors).
+    #[serde(default)]
+    #[validate(length(min = 1, max = 255))]
+    pub meta_message_id: Option<String>,
+}
+
 /// Datos del pedido guardados en las columnas de `guides`.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[derive(sqlx::FromRow)]
@@ -135,6 +158,9 @@ pub struct GuideWithDetails {
     pub guide: Guide,
     pub details: GuideDetails,
     pub products: Vec<GuideProduct>,
+    /// Ya se le envió el video del producto (un mensaje saliente de video
+    /// ligado a la guía que no falló): el video va una sola vez por guía.
+    pub video_sent: bool,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -149,13 +175,16 @@ pub struct GuideFilters {
     pub user_phone: Option<String>,
 }
 
-/// Fila de estadísticas: notificaciones de guías por día y tipo
-/// (notification_count: 1=inicial, 2=recordatorio, 3=recordatorio final,
-/// 4+=seguimiento diario de pedidos de Dropi).
+/// Fila de estadísticas: notificaciones de guías por día y tipo.
+/// - kind "office": notification_count 1=inicial, 2=recordatorio,
+///   3=recordatorio final, 4+=seguimiento diario de pedidos de Dropi.
+/// - kind "tracking": seguimiento del envío de Dropi, notification_count
+///   es el nivel (1=pedido enviado, 2=pedido en camino).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[derive(sqlx::FromRow)]
 pub struct DailyNotificationStat {
     pub day: chrono::NaiveDate,
+    pub kind: String,
     pub notification_count: i32,
     pub total: i64,
 }
@@ -186,6 +215,26 @@ mod tests {
         invalid_phone.user_phone = "573003579384".into();
         invalid_phone.business_id = 0;
         assert!(invalid_phone.validate().is_err());
+    }
+
+    #[test]
+    fn guide_phone_accepts_8_to_15_digits() {
+        // Un teléfono mal digitado en Dropi (9 dígitos, sin indicativo) se
+        // acepta: si se rechazara, la guía no quedaría registrada y la misma
+        // notificación se enviaría en cada corrida.
+        let with_phone = |phone: &str| RegisterGuideDto {
+            number: "FD45379197".into(),
+            user_phone: phone.into(),
+            user_name: None,
+            business_id: 2,
+            details: None,
+        };
+        for phone in ["51319585", "488760023", "50251319585", "+573003579384", "123456789012345"] {
+            assert!(with_phone(phone).validate().is_ok(), "{phone}");
+        }
+        for phone in ["1234567", "1234567890123456", "50251-319585"] {
+            assert!(with_phone(phone).validate().is_err(), "{phone}");
+        }
     }
 
     #[test]
@@ -239,6 +288,25 @@ mod tests {
         assert!(with_products(vec![product("Collar", 1)]).validate().is_ok());
         assert!(with_products(vec![product("   ", 1)]).validate().is_err());
         assert!(with_products(vec![product("Collar", 0)]).validate().is_err());
+    }
+
+    #[test]
+    fn tracking_level_must_be_1_or_2() {
+        let dto = |level| MarkTrackingDto { level, meta_message_id: None };
+        assert!(dto(1).validate().is_ok());
+        assert!(dto(2).validate().is_ok());
+        assert!(dto(0).validate().is_err());
+        assert!(dto(3).validate().is_err());
+    }
+
+    #[test]
+    fn mark_bodies_accept_an_optional_message_id() {
+        let tracking: MarkTrackingDto = serde_json::from_str(r#"{"level": 1}"#).unwrap();
+        assert!(tracking.meta_message_id.is_none());
+
+        let notified: MarkNotifiedDto = serde_json::from_str(r#"{"meta_message_id": "wamid.1"}"#).unwrap();
+        assert_eq!(notified.meta_message_id.as_deref(), Some("wamid.1"));
+        assert!(MarkNotifiedDto { meta_message_id: Some(String::new()) }.validate().is_err());
     }
 
     #[test]

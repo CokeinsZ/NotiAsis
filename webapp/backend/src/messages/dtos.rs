@@ -1,14 +1,9 @@
 use chrono::NaiveDateTime;
-use once_cell::sync::Lazy;
-use regex::Regex;
 use serde::{Deserialize, Serialize};
 use validator::Validate;
 
 use crate::tools::custom_validators::validate_non_blank;
-
-static PHONE_REGEX: Lazy<Regex> = Lazy::new(|| {
-    Regex::new(r"^\+?\d{10,15}$").unwrap()
-});
+use crate::tools::phones::PHONE_REGEX;
 
 #[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
@@ -30,6 +25,9 @@ pub enum MessageStatus {
     Sent,
     Delivered,
     Read,
+    /// Meta aceptó el envío pero no lo pudo entregar (el detalle está en
+    /// messages_errors). Se registra con POST /messages/{id}/errors.
+    Failed,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -61,7 +59,7 @@ pub struct SendMessageDto {
 /// Mensaje entrante reportado por el bot (webhook de Meta).
 #[derive(Debug, Serialize, Deserialize, Validate)]
 pub struct IncomingMessageDto {
-    #[validate(regex(path = *PHONE_REGEX, message = "El teléfono debe tener entre 10 y 15 dígitos, con '+' opcional"))]
+    #[validate(regex(path = *PHONE_REGEX, message = "El teléfono debe tener entre 8 y 15 dígitos, con '+' opcional"))]
     pub user_phone: String,
 
     #[validate(length(max = 255))]
@@ -94,7 +92,7 @@ pub struct IncomingMessageDto {
 pub struct OutgoingMessageDto {
     pub business_id: i32,
 
-    #[validate(regex(path = *PHONE_REGEX, message = "El teléfono debe tener entre 10 y 15 dígitos, con '+' opcional"))]
+    #[validate(regex(path = *PHONE_REGEX, message = "El teléfono debe tener entre 8 y 15 dígitos, con '+' opcional"))]
     pub user_phone: String,
 
     #[validate(length(max = 255))]
@@ -117,6 +115,51 @@ pub struct OutgoingMessageDto {
 #[derive(Debug, Serialize, Deserialize, Validate)]
 pub struct UpdateMessageStatusDto {
     pub status: MessageStatus,
+}
+
+/// Error de un mensaje enviado, reportado por Meta en el webhook (estado
+/// 'failed'). El bot lo reenvía tal cual llega.
+#[derive(Debug, Serialize, Deserialize, Validate)]
+pub struct RegisterMessageErrorDto {
+    /// errors[0].code, ej. 131048.
+    pub error_code: Option<i32>,
+
+    /// errors[0].title, ej. "Spam Rate limit hit".
+    #[validate(length(max = 255))]
+    pub error_title: Option<String>,
+
+    /// El estado completo que envió Meta (id, status, timestamp,
+    /// recipient_id, errors...).
+    #[validate(custom(function = "validate_json_object"))]
+    pub payload: serde_json::Value,
+}
+
+/// Notificación de una guía deshecha porque su mensaje falló: la guía
+/// volvió al paso (kind 'office') o nivel (kind 'tracking') anterior.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(sqlx::FromRow)]
+pub struct UndoneNotification {
+    pub guide_number: Option<String>,
+    pub kind: String,
+    pub notification_step: i32,
+}
+
+/// Resultado de registrar el error de un mensaje.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct MessageFailure {
+    /// Si el mensaje estaba registrado (y quedó en 'failed'). Si aún no,
+    /// nace 'failed' cuando el bot lo registre.
+    pub message_found: bool,
+    pub undone: Vec<UndoneNotification>,
+}
+
+fn validate_json_object(value: &serde_json::Value) -> Result<(), validator::ValidationError> {
+    if value.is_object() {
+        return Ok(());
+    }
+    let mut error = validator::ValidationError::new("object");
+    error.message = Some("payload debe ser el objeto del estado que envió Meta".into());
+    Err(error)
 }
 
 #[cfg(test)]
@@ -153,5 +196,18 @@ mod tests {
     fn status_deserializes_from_meta_lowercase() {
         let dto: UpdateMessageStatusDto = serde_json::from_str(r#"{"status": "delivered"}"#).unwrap();
         assert_eq!(dto.status, MessageStatus::Delivered);
+    }
+
+    #[test]
+    fn error_payload_must_be_the_status_object() {
+        let dto: RegisterMessageErrorDto = serde_json::from_str(
+            r#"{"error_code": 131048, "error_title": "Spam Rate limit hit",
+                "payload": {"id": "wamid.1", "status": "failed", "errors": [{"code": 131048}]}}"#,
+        )
+        .unwrap();
+        assert!(dto.validate().is_ok());
+
+        let not_object = RegisterMessageErrorDto { payload: serde_json::json!("failed"), ..dto };
+        assert!(not_object.validate().is_err());
     }
 }

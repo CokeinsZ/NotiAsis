@@ -1,7 +1,14 @@
+import time
+
 import requests
 
 from app.core.interfaces import NotificationBackend
 from app.core.phones import PhoneCountry, normalize_phone
+from app.models.quota import QuotaReservation
+
+# Intentos al pedir cupo si otra corrida lo tiene bloqueado (503).
+QUOTA_ATTEMPTS = 3
+QUOTA_RETRY_SECONDS = 2
 
 
 class RustBackendClient(NotificationBackend):
@@ -93,6 +100,12 @@ class RustBackendClient(NotificationBackend):
             payload["details"] = details
         try:
             response = self._request("POST", "/guides", json=payload)
+            if 400 <= response.status_code < 500:
+                # Datos inválidos (ej. teléfono): sin la guía registrada su
+                # notificación no se puede marcar y se repetiría en cada
+                # corrida. No se notifica.
+                print(f"Guide {number} rejected by backend ({response.status_code}): {response.text}; not notifying")
+                return False
             response.raise_for_status()
             created = bool(response.json().get("created", True))
             if not created:
@@ -100,7 +113,7 @@ class RustBackendClient(NotificationBackend):
             return created
         except Exception as e:
             print(f"Error registering guide {number} in backend: {e}")
-            return True  # fail-open: mejor notificar duplicado que perder la notificación
+            return False  # mejor perder la notificación que notificar duplicado 
 
     def get_guide(self, number: str) -> dict | None:
         try:
@@ -146,7 +159,11 @@ class RustBackendClient(NotificationBackend):
             response = self._request("GET", f"/businesses/{business_id}")
             response.raise_for_status()
             country = response.json()["business"]["country"]
-            return PhoneCountry(phone_prefix=country["phone_prefix"], phone_length=int(country["phone_length"]))
+            return PhoneCountry(
+                phone_prefix=country["phone_prefix"],
+                phone_length=int(country["phone_length"]),
+                code=str(country.get("code") or "").strip().upper(),
+            )
         except Exception as e:
             print(f"Error fetching country of business {business_id}: {e}")
             return None
@@ -163,12 +180,35 @@ class RustBackendClient(NotificationBackend):
             print(f"Error fetching sheet config for business {business_id}: {e}")
             return None
 
-    def mark_guide_notified(self, number: str) -> None:
+    def mark_guide_notified(self, number: str, meta_message_id: str | None = None) -> None:
         try:
-            response = self._request("POST", f"/guides/{number}/notified")
+            response = self._request(
+                "POST", f"/guides/{number}/notified", json={"meta_message_id": meta_message_id}
+            )
             response.raise_for_status()
+            self._warn_if_not_counted(response, f"Guide {number} notification")
         except Exception as e:
             print(f"Error marking guide {number} as notified: {e}")
+
+    def mark_guide_tracking(self, number: str, level: int, meta_message_id: str | None = None) -> None:
+        try:
+            response = self._request(
+                "POST",
+                f"/guides/{number}/tracking",
+                json={"level": level, "meta_message_id": meta_message_id},
+            )
+            response.raise_for_status()
+        except Exception as e:
+            print(f"Error marking tracking level {level} of guide {number}: {e}")
+
+    @staticmethod
+    def _warn_if_not_counted(response, what: str) -> None:
+        """`updated: false`: Meta ya había reportado que el mensaje falló."""
+        try:
+            if response.json().get("updated") is False:
+                print(f"{what} not counted: its message already failed")
+        except ValueError:
+            pass
 
     def register_incoming_message(
         self,
@@ -245,3 +285,57 @@ class RustBackendClient(NotificationBackend):
             response.raise_for_status()
         except Exception as e:
             print(f"Error updating status of message {meta_message_id}: {e}")
+
+    def reserve_quota(
+        self, phones: list[str], kind: str, business_id: int, ttl_minutes: int
+    ) -> QuotaReservation | None:
+        payload = {"phones": phones, "kind": kind, "business_id": business_id, "ttl_minutes": ttl_minutes}
+        for attempt in range(1, QUOTA_ATTEMPTS + 1):
+            try:
+                response = self._request("POST", "/quota/reservations", json=payload)
+                if response.status_code == 503 and attempt < QUOTA_ATTEMPTS:
+                    # Otra corrida tiene el cupo bloqueado: reintentar.
+                    print(f"Quota busy, retrying ({attempt}/{QUOTA_ATTEMPTS - 1})")
+                    time.sleep(QUOTA_RETRY_SECONDS)
+                    continue
+                response.raise_for_status()
+                data = response.json()
+                return QuotaReservation(
+                    approved_phones=tuple(data.get("approved_phones") or ()),
+                    denied_phones=tuple(data.get("denied_phones") or ()),
+                    reservation_id=data.get("reservation_id"),
+                )
+            except Exception as e:
+                print(f"Error reserving messaging quota for {len(phones)} phone(s): {e}")
+                return None
+        return None
+
+    def release_quota(self, reservation_id: int) -> None:
+        try:
+            response = self._request("DELETE", f"/quota/reservations/{reservation_id}")
+            response.raise_for_status()
+        except Exception as e:
+            # Vence sola (ttl_minutes): mientras tanto ocupa cupo de más.
+            print(f"Error releasing quota reservation {reservation_id}: {e}")
+
+    def register_message_error(
+        self,
+        meta_message_id: str,
+        error_code: int | None,
+        error_title: str | None,
+        payload: dict,
+    ) -> None:
+        try:
+            response = self._request(
+                "POST",
+                f"/messages/{meta_message_id}/errors",
+                json={"error_code": error_code, "error_title": error_title, "payload": payload},
+            )
+            response.raise_for_status()
+            for undone in response.json().get("undone", []):
+                print(
+                    f"Message {meta_message_id} failed ({error_code}): guide {undone.get('guide_number')} "
+                    f"{undone.get('kind')} notification {undone.get('notification_step')} undone"
+                )
+        except Exception as e:
+            print(f"Error registering failure of message {meta_message_id}: {e}")

@@ -1,16 +1,9 @@
 use chrono::NaiveDateTime;
-use once_cell::sync::Lazy;
-use regex::Regex;
 use serde::{Deserialize, Serialize};
 use validator::Validate;
 
 use crate::tools::custom_validators::{validate_non_blank, validate_password};
-use crate::tools::phones::to_international;
-
-/// Con o sin indicativo: el número nacional más corto es el de Guatemala (8).
-pub static PHONE_REGEX: Lazy<Regex> = Lazy::new(|| {
-    Regex::new(r"^\+?\d{8,15}$").unwrap()
-});
+use crate::tools::phones::{PHONE_REGEX, to_international};
 
 #[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
 #[derive(sqlx::Type)]

@@ -6,6 +6,7 @@ use chrono::NaiveDateTime;
 use crate::guides::dtos::{
     DailyNotificationStat, Guide, GuideDetails, GuideDetailsDto, GuideProduct, GuideWithDetails,
 };
+use crate::tools::message_lock::{lock_message, retryable_failure};
 
 #[async_trait]
 pub trait GuideRepositoryTrait: Send + Sync {
@@ -20,8 +21,26 @@ pub trait GuideRepositoryTrait: Send + Sync {
     async fn save_details(&self, number: &str, details: &GuideDetailsDto) -> Result<bool, String>;
     /// Las guías existentes entre `numbers`, con sus datos de pedido.
     async fn get_guides_with_details(&self, numbers: &[String]) -> Result<Vec<GuideWithDetails>, String>;
-    /// Marca cuándo se notificó la guía por última vez.
-    async fn mark_notified(&self, number: &str, timestamp: NaiveDateTime) -> Result<bool, String>;
+    /// Cuenta una notificación de oficina (notification_count + 1) y la
+    /// registra en guide_notifications ligada a `meta_message_id`. No hace
+    /// nada si Meta ya reportó que ese mensaje falló. Retorna si la contó.
+    async fn mark_notified(
+        &self,
+        number: &str,
+        timestamp: NaiveDateTime,
+        meta_message_id: Option<&str>,
+    ) -> Result<bool, String>;
+    /// Sube el nivel de seguimiento notificado de la guía y lo registra en
+    /// guide_notifications (kind 'tracking') ligado a `meta_message_id`. No
+    /// cambia nada si ya tenía ese nivel o uno mayor, o si Meta ya reportó
+    /// que el mensaje falló. Retorna true si lo subió.
+    async fn raise_tracking_level(
+        &self,
+        number: &str,
+        level: i16,
+        timestamp: NaiveDateTime,
+        meta_message_id: Option<&str>,
+    ) -> Result<bool, String>;
     /// Notificaciones por día y tipo para el dashboard del business.
     async fn get_notification_stats(
         &self,
@@ -34,6 +53,22 @@ pub trait GuideRepositoryTrait: Send + Sync {
 
 pub struct PostgresGuideRepository {
     db_pool: sqlx::PgPool,
+}
+
+/// Con el mensaje de la notificación, toma su bloqueo y dice si se puede
+/// registrar: false si Meta ya reportó que falló (el webhook del error
+/// llegó antes que la marca del bot), salvo con un error permanente (se
+/// cuenta como hecha, como en `register_failure`). Sin mensaje no hay nada
+/// que revisar.
+async fn message_can_notify(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    meta_message_id: Option<&str>,
+) -> Result<bool, String> {
+    let Some(meta_message_id) = meta_message_id else {
+        return Ok(true);
+    };
+    lock_message(tx, meta_message_id).await?;
+    Ok(!retryable_failure(tx, meta_message_id).await?)
 }
 
 impl PostgresGuideRepository {
@@ -49,7 +84,8 @@ impl GuideRepositoryTrait for PostgresGuideRepository {
             INSERT INTO guides (number, user_id, business_id)
             VALUES ($1, $2, $3)
             ON CONFLICT (number) DO NOTHING
-            RETURNING number, user_id, business_id, last_notification_timestamp, notification_count
+            RETURNING number, user_id, business_id, last_notification_timestamp, notification_count,
+                      tracking_level, tracking_notified_at
         "#;
 
         sqlx::query_as::<_, Guide>(query)
@@ -63,7 +99,8 @@ impl GuideRepositoryTrait for PostgresGuideRepository {
 
     async fn get_guide_by_number(&self, number: &str) -> Result<Option<Guide>, String> {
         let query = r#"
-            SELECT number, user_id, business_id, last_notification_timestamp, notification_count
+            SELECT number, user_id, business_id, last_notification_timestamp, notification_count,
+                   tracking_level, tracking_notified_at
             FROM guides WHERE number = $1
         "#;
 
@@ -76,7 +113,8 @@ impl GuideRepositoryTrait for PostgresGuideRepository {
 
     async fn get_guides(&self, user_phone: Option<&str>) -> Result<Vec<Guide>, String> {
         let mut query = sqlx::QueryBuilder::new(
-            "SELECT number, user_id, business_id, last_notification_timestamp, notification_count FROM guides WHERE 1=1"
+            "SELECT number, user_id, business_id, last_notification_timestamp, notification_count, \
+             tracking_level, tracking_notified_at FROM guides WHERE 1=1"
         );
 
         if let Some(phone) = user_phone {
@@ -162,12 +200,24 @@ impl GuideRepositoryTrait for PostgresGuideRepository {
             guide: Guide,
             #[sqlx(flatten)]
             details: GuideDetails,
+            video_sent: bool,
         }
 
         let guides_query = r#"
             SELECT number, user_id, business_id, last_notification_timestamp, notification_count,
+                   tracking_level, tracking_notified_at,
                    order_id, customer_name, customer_document, delivery_address, city,
-                   shipping_company, order_total::float8 AS total, currency
+                   shipping_company, order_total::float8 AS total, currency,
+                   -- Los únicos videos salientes ligados a una guía son el
+                   -- video_producto del bot (los mensajes libres de la webapp
+                   -- no llevan guía).
+                   EXISTS (
+                       SELECT 1 FROM messages m
+                       WHERE m.guide_number = guides.number
+                         AND NOT m.from_user
+                         AND m.media_type = 'video'
+                         AND m.status IS DISTINCT FROM 'failed'
+                   ) AS video_sent
             FROM guides WHERE number = ANY($1)
         "#;
 
@@ -200,11 +250,22 @@ impl GuideRepositoryTrait for PostgresGuideRepository {
                 products: products_by_guide.remove(&row.guide.number).unwrap_or_default(),
                 guide: row.guide,
                 details: row.details,
+                video_sent: row.video_sent,
             })
             .collect())
     }
 
-    async fn mark_notified(&self, number: &str, timestamp: NaiveDateTime) -> Result<bool, String> {
+    async fn mark_notified(
+        &self,
+        number: &str,
+        timestamp: NaiveDateTime,
+        meta_message_id: Option<&str>,
+    ) -> Result<bool, String> {
+        let mut tx = self.db_pool.begin().await.map_err(|e| e.to_string())?;
+        if !message_can_notify(&mut tx, meta_message_id).await? {
+            return Ok(false);
+        }
+
         let query = r#"
             WITH updated AS (
                 UPDATE guides
@@ -213,18 +274,60 @@ impl GuideRepositoryTrait for PostgresGuideRepository {
                 WHERE number = $1
                 RETURNING number, business_id, user_id, notification_count, last_notification_timestamp
             )
-            INSERT INTO guide_notifications (guide_number, business_id, user_id, notification_step, created_at)
-            SELECT number, business_id, user_id, notification_count, last_notification_timestamp
+            INSERT INTO guide_notifications (guide_number, business_id, user_id, notification_step, created_at, meta_message_id)
+            SELECT number, business_id, user_id, notification_count, last_notification_timestamp, $3
             FROM updated
         "#;
 
         let result = sqlx::query(query)
             .bind(number)
             .bind(timestamp)
-            .execute(&self.db_pool)
+            .bind(meta_message_id)
+            .execute(&mut *tx)
             .await
             .map_err(|e| e.to_string())?;
 
+        tx.commit().await.map_err(|e| e.to_string())?;
+        Ok(result.rows_affected() > 0)
+    }
+
+    async fn raise_tracking_level(
+        &self,
+        number: &str,
+        level: i16,
+        timestamp: NaiveDateTime,
+        meta_message_id: Option<&str>,
+    ) -> Result<bool, String> {
+        let mut tx = self.db_pool.begin().await.map_err(|e| e.to_string())?;
+        if !message_can_notify(&mut tx, meta_message_id).await? {
+            return Ok(false);
+        }
+
+        // La condición hace el cambio atómico: el nivel nunca baja y una
+        // segunda marca del mismo nivel no hace nada. Cada subida queda en
+        // guide_notifications (kind 'tracking') para el dashboard.
+        let query = r#"
+            WITH updated AS (
+                UPDATE guides
+                SET tracking_level = $2, tracking_notified_at = $3::timestamp
+                WHERE number = $1 AND tracking_level < $2
+                RETURNING number, business_id, user_id, tracking_level, tracking_notified_at
+            )
+            INSERT INTO guide_notifications (guide_number, business_id, user_id, notification_step, kind, created_at, meta_message_id)
+            SELECT number, business_id, user_id, tracking_level, 'tracking', tracking_notified_at, $4
+            FROM updated
+        "#;
+
+        let result = sqlx::query(query)
+            .bind(number)
+            .bind(level)
+            .bind(timestamp)
+            .bind(meta_message_id)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| e.to_string())?;
+
+        tx.commit().await.map_err(|e| e.to_string())?;
         Ok(result.rows_affected() > 0)
     }
 
@@ -238,6 +341,7 @@ impl GuideRepositoryTrait for PostgresGuideRepository {
         let mut query = sqlx::QueryBuilder::new(
             r#"SELECT
                 created_at::date AS day,
+                kind,
                 notification_step AS notification_count,
                 COUNT(*) AS total
             FROM guide_notifications
@@ -260,7 +364,7 @@ impl GuideRepositoryTrait for PostgresGuideRepository {
             query.push_bind(end);
         }
 
-        query.push(" GROUP BY day, notification_step ORDER BY day, notification_step");
+        query.push(" GROUP BY day, kind, notification_step ORDER BY day, kind, notification_step");
 
         query.build_query_as::<DailyNotificationStat>()
             .fetch_all(&self.db_pool)

@@ -22,7 +22,14 @@ pub trait GuideServiceTrait: Send + Sync {
     /// Consulta una guía puntual (el bot la usa para decidir entre
     /// notificación completa o recordatorio).
     async fn get_guide(&self, number: &str) -> Result<Guide, String>;
-    async fn mark_notified(&self, number: &str) -> Result<(), String>;
+    /// Cuenta una notificación de oficina de la guía. `meta_message_id` es
+    /// el mensaje principal: si Meta reporta que falló, se deshace. Retorna
+    /// false si Meta ya lo había reportado como fallido (no se cuenta).
+    async fn mark_notified(&self, number: &str, meta_message_id: Option<&str>) -> Result<bool, String>;
+    /// Registra que la guía recibió la notificación de seguimiento del
+    /// nivel `level` (1 o 2). El nivel solo sube: retorna false si la guía
+    /// ya tenía ese nivel o uno mayor, o si el mensaje ya falló.
+    async fn mark_tracking(&self, number: &str, level: i16, meta_message_id: Option<&str>) -> Result<bool, String>;
     /// Estadísticas de notificaciones por día y tipo para el dashboard.
     async fn get_notification_stats(
         &self,
@@ -114,7 +121,7 @@ impl GuideServiceTrait for GuideService {
             .await
     }
 
-    async fn mark_notified(&self, number: &str) -> Result<(), String> {
+    async fn mark_notified(&self, number: &str, meta_message_id: Option<&str>) -> Result<bool, String> {
         let now = chrono::Utc::now().naive_utc();
 
         let guide = self.guide_repository
@@ -122,15 +129,35 @@ impl GuideServiceTrait for GuideService {
             .await?
             .ok_or_else(|| "Guide not found".to_string())?;
 
-        self.guide_repository.mark_notified(number, now).await?;
+        let marked = self.guide_repository.mark_notified(number, now, meta_message_id).await?;
+        if marked {
+            // Reflejar la notificación en los chats del usuario (criterio de
+            // orden de la bandeja).
+            self.chat_repository
+                .touch_guide_notification(&guide.user_id, now)
+                .await?;
+        }
 
-        // Reflejar la notificación en los chats del usuario (criterio de
-        // orden de la bandeja).
-        self.chat_repository
-            .touch_guide_notification(&guide.user_id, now)
-            .await?;
+        Ok(marked)
+    }
 
-        Ok(())
+    async fn mark_tracking(&self, number: &str, level: i16, meta_message_id: Option<&str>) -> Result<bool, String> {
+        let now = chrono::Utc::now().naive_utc();
+
+        let guide = self.guide_repository
+            .get_guide_by_number(number)
+            .await?
+            .ok_or_else(|| "Guide not found".to_string())?;
+
+        let raised = self.guide_repository.raise_tracking_level(number, level, now, meta_message_id).await?;
+        if raised {
+            // Es una notificación de la guía como las demás: ordena la bandeja.
+            self.chat_repository
+                .touch_guide_notification(&guide.user_id, now)
+                .await?;
+        }
+
+        Ok(raised)
     }
 }
 
@@ -147,6 +174,8 @@ mod tests {
         guides: Mutex<Vec<Guide>>,
         saved_details: Mutex<Vec<(String, GuideDetailsDto)>>,
         lookups: Mutex<Vec<Vec<String>>>,
+        /// Mensajes que Meta ya reportó como fallidos.
+        failed_messages: Mutex<Vec<String>>,
     }
 
     struct FakeChatRepository {
@@ -191,6 +220,7 @@ mod tests {
                 guides: Mutex::new(Vec::new()),
                 saved_details: Mutex::new(Vec::new()),
                 lookups: Mutex::new(Vec::new()),
+                failed_messages: Mutex::new(Vec::new()),
             }
         }
     }
@@ -208,6 +238,8 @@ mod tests {
                 business_id,
                 last_notification_timestamp: None,
                 notification_count: 0,
+                tracking_level: 0,
+                tracking_notified_at: None,
             };
             guides.push(guide.clone());
             Ok(Some(guide))
@@ -240,15 +272,41 @@ mod tests {
                     guide: g.clone(),
                     details: GuideDetails::default(),
                     products: Vec::new(),
+                    video_sent: false,
                 })
                 .collect())
         }
 
-        async fn mark_notified(&self, number: &str, timestamp: NaiveDateTime) -> Result<bool, String> {
+        async fn mark_notified(&self, number: &str, timestamp: NaiveDateTime, meta_message_id: Option<&str>) -> Result<bool, String> {
+            if meta_message_id.is_some_and(|id| self.failed_messages.lock().unwrap().iter().any(|f| f == id)) {
+                return Ok(false);
+            }
             let mut guides = self.guides.lock().unwrap();
             match guides.iter_mut().find(|g| g.number == number) {
                 Some(guide) => {
                     guide.last_notification_timestamp = Some(timestamp);
+                    guide.notification_count += 1;
+                    Ok(true)
+                }
+                None => Ok(false),
+            }
+        }
+
+        async fn raise_tracking_level(
+            &self,
+            number: &str,
+            level: i16,
+            timestamp: NaiveDateTime,
+            meta_message_id: Option<&str>,
+        ) -> Result<bool, String> {
+            if meta_message_id.is_some_and(|id| self.failed_messages.lock().unwrap().iter().any(|f| f == id)) {
+                return Ok(false);
+            }
+            let mut guides = self.guides.lock().unwrap();
+            match guides.iter_mut().find(|g| g.number == number && g.tracking_level < level) {
+                Some(guide) => {
+                    guide.tracking_level = level;
+                    guide.tracking_notified_at = Some(timestamp);
                     Ok(true)
                 }
                 None => Ok(false),
@@ -401,13 +459,56 @@ mod tests {
         let (service, repository, chat_repo) = build_service();
         service.register_guide(dto("GUIA123")).await.unwrap();
 
-        service.mark_notified("GUIA123").await.unwrap();
+        assert!(service.mark_notified("GUIA123", Some("wamid.1")).await.unwrap());
 
         let guide = repository.guides.lock().unwrap()[0].clone();
         assert!(guide.last_notification_timestamp.is_some());
         // La notificación también se refleja en los chats del usuario
         assert_eq!(chat_repo.touched.lock().unwrap().as_slice(), ["573003579384"]);
 
-        assert_eq!(service.mark_notified("NOEXISTE").await.unwrap_err(), "Guide not found");
+        assert_eq!(service.mark_notified("NOEXISTE", None).await.unwrap_err(), "Guide not found");
+    }
+
+    #[tokio::test]
+    async fn a_message_meta_already_reported_as_failed_does_not_count() {
+        // El webhook del error llegó antes que la marca del bot.
+        let (service, repository, chat_repo) = build_service();
+        service.register_guide(dto("G1")).await.unwrap();
+        repository.failed_messages.lock().unwrap().push("wamid.fallido".into());
+
+        assert!(!service.mark_notified("G1", Some("wamid.fallido")).await.unwrap());
+        assert!(!service.mark_tracking("G1", 1, Some("wamid.fallido")).await.unwrap());
+
+        let guide = repository.guides.lock().unwrap()[0].clone();
+        assert_eq!(guide.notification_count, 0);
+        assert_eq!(guide.tracking_level, 0);
+        assert!(chat_repo.touched.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn tracking_level_only_goes_up_and_does_not_count_as_office_notification() {
+        let (service, repository, chat_repo) = build_service();
+        service.register_guide(dto("G1")).await.unwrap();
+
+        assert!(service.mark_tracking("G1", 1, None).await.unwrap());
+        assert!(!service.mark_tracking("G1", 1, None).await.unwrap()); // cada nivel una sola vez
+        assert!(service.mark_tracking("G1", 2, None).await.unwrap());
+        assert!(!service.mark_tracking("G1", 1, None).await.unwrap()); // nunca baja
+
+        let guide = repository.guides.lock().unwrap()[0].clone();
+        assert_eq!(guide.tracking_level, 2);
+        assert!(guide.tracking_notified_at.is_some());
+        // El nivel 3 (reclame en oficina) sigue sin notificar.
+        assert_eq!(guide.notification_count, 0);
+        assert!(guide.last_notification_timestamp.is_none());
+        // Solo las dos subidas de nivel tocan el chat.
+        assert_eq!(chat_repo.touched.lock().unwrap().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn tracking_of_unknown_guide_is_not_found() {
+        let (service, _, chat_repo) = build_service();
+        assert_eq!(service.mark_tracking("NOEXISTE", 1, None).await.unwrap_err(), "Guide not found");
+        assert!(chat_repo.touched.lock().unwrap().is_empty());
     }
 }

@@ -14,12 +14,21 @@ const PRESET_DAYS = [
   { label: "90 días", days: 90 },
 ] as const;
 
-const SERIES = [
-  { key: "initial", label: "Notificación inicial", color: "bg-moon" },
-  { key: "reminder", label: "Recordatorio", color: "bg-moon/50" },
-  { key: "final", label: "Recordatorio final", color: "bg-white" },
-  { key: "daily", label: "Seguimiento diario", color: "bg-neutral-500" },
-] as const;
+type SeriesKey = Exclude<keyof DayStats, "day">;
+
+/**
+ * Tipos de notificación en el orden del recorrido del pedido: así se apilan
+ * las barras (de abajo hacia arriba) y se listan leyenda, tarjetas y desglose.
+ * `color` pinta barra, punto y leyenda; `text`, los números.
+ */
+const SERIES: readonly { key: SeriesKey; label: string; short: string; color: string; text: string }[] = [
+  { key: "shipped", label: "Pedido enviado", short: "Enviado", color: "bg-ember", text: "text-white" },
+  { key: "inTransit", label: "Pedido en camino", short: "En camino", color: "bg-aqua", text: "text-white" },
+  { key: "initial", label: "Oficina inicial", short: "Oficina inicial", color: "bg-moon", text: "text-moon" },
+  { key: "reminder", label: "Recordatorio", short: "Recordatorio", color: "bg-moon/50", text: "text-moon/80" },
+  { key: "final", label: "Recordatorio final", short: "Final", color: "bg-white", text: "text-white" },
+  { key: "daily", label: "Seguimiento diario", short: "Diario", color: "bg-neutral-500", text: "text-neutral-400" },
+];
 
 const MONTHS_SHORT = [
   "ene", "feb", "mar", "abr", "may", "jun",
@@ -57,24 +66,35 @@ function generateDateRange(startDateStr: string, endDateStr: string): string[] {
   return dates;
 }
 
+function emptyDay(day: string): DayStats {
+  return { day, shipped: 0, inTransit: 0, initial: 0, reminder: 0, final: 0, daily: 0 };
+}
+
 function dayTotal(s: DayStats): number {
-  return s.initial + s.reminder + s.final + s.daily;
+  return SERIES.reduce((sum, series) => sum + s[series.key], 0);
+}
+
+/** Tipo de una fila del backend: el seguimiento del envío trae el nivel y
+ *  la escalación de la guía, cuántas veces se ha notificado. */
+function seriesOf(row: NotificationStatRow): SeriesKey {
+  if (row.kind === "tracking") return row.notification_count === 1 ? "shipped" : "inTransit";
+  if (row.notification_count === 1) return "initial";
+  if (row.notification_count === 2) return "reminder";
+  if (row.notification_count === 3) return "final";
+  return "daily";
 }
 
 /** Pivota las filas del backend agrupadas por día y garantiza que todos los días del rango existan. */
 function buildDailyStats(rows: NotificationStatRow[], dateList: string[]): DayStats[] {
   const map = new Map<string, DayStats>();
   for (const dateStr of dateList) {
-    map.set(dateStr, { day: dateStr, initial: 0, reminder: 0, final: 0, daily: 0 });
+    map.set(dateStr, emptyDay(dateStr));
   }
 
   for (const row of rows) {
     const entry = map.get(row.day);
     if (!entry) continue;
-    if (row.notification_count === 1) entry.initial += row.total;
-    else if (row.notification_count === 2) entry.reminder += row.total;
-    else if (row.notification_count === 3) entry.final += row.total;
-    else entry.daily += row.total;
+    entry[seriesOf(row)] += row.total;
   }
 
   return dateList.map((d) => map.get(d)!);
@@ -164,16 +184,11 @@ export default function DashboardApp({ businessId }: { businessId: number }) {
 
   // Totales acumulados del período seleccionado
   const totals = useMemo(() => {
-    return stats.reduce(
-      (acc, s) => ({
-        total: acc.total + dayTotal(s),
-        initial: acc.initial + s.initial,
-        reminder: acc.reminder + s.reminder,
-        final: acc.final + s.final,
-        daily: acc.daily + s.daily,
-      }),
-      { total: 0, initial: 0, reminder: 0, final: 0, daily: 0 },
-    );
+    const acc = emptyDay("");
+    for (const s of stats) {
+      for (const series of SERIES) acc[series.key] += s[series.key];
+    }
+    return { ...acc, total: dayTotal(acc) };
   }, [stats]);
 
   // Acciones rápidas de fecha
@@ -364,8 +379,8 @@ export default function DashboardApp({ businessId }: { businessId: number }) {
         </section>
 
         {/* Tarjetas de totales del período seleccionado */}
-        <section className="mt-4 grid grid-cols-2 gap-3 sm:grid-cols-5">
-          <div className="col-span-2 rounded border border-moon/35 bg-black px-4 py-3 sm:col-span-1">
+        <section className="mt-4 grid grid-cols-2 gap-3 sm:grid-cols-3">
+          <div className="col-span-2 rounded border border-moon/35 bg-black px-4 py-3 sm:col-span-3">
             <span className="text-[11px] font-medium text-neutral-400">
               Total notificaciones
             </span>
@@ -374,45 +389,17 @@ export default function DashboardApp({ businessId }: { businessId: number }) {
             </p>
           </div>
 
-          <div className="rounded border border-moon/35 bg-black px-4 py-3">
-            <span className="flex items-center gap-1.5 text-[11px] font-medium text-neutral-400">
-              <span className="inline-block h-2 w-2 rounded-full bg-moon" />
-              Notificación inicial
-            </span>
-            <p className="mt-1 font-mono text-2xl font-bold text-moon">
-              {totals.initial}
-            </p>
-          </div>
-
-          <div className="rounded border border-moon/35 bg-black px-4 py-3">
-            <span className="flex items-center gap-1.5 text-[11px] font-medium text-neutral-400">
-              <span className="inline-block h-2 w-2 rounded-full bg-moon/50" />
-              Recordatorio
-            </span>
-            <p className="mt-1 font-mono text-2xl font-bold text-moon/80">
-              {totals.reminder}
-            </p>
-          </div>
-
-          <div className="rounded border border-moon/35 bg-black px-4 py-3">
-            <span className="flex items-center gap-1.5 text-[11px] font-medium text-neutral-400">
-              <span className="inline-block h-2 w-2 rounded-full bg-white" />
-              Recordatorio final
-            </span>
-            <p className="mt-1 font-mono text-2xl font-bold text-white">
-              {totals.final}
-            </p>
-          </div>
-
-          <div className="rounded border border-moon/35 bg-black px-4 py-3">
-            <span className="flex items-center gap-1.5 text-[11px] font-medium text-neutral-400">
-              <span className="inline-block h-2 w-2 rounded-full bg-neutral-500" />
-              Seguimiento diario
-            </span>
-            <p className="mt-1 font-mono text-2xl font-bold text-neutral-400">
-              {totals.daily}
-            </p>
-          </div>
+          {SERIES.map((s) => (
+            <div key={s.key} className="rounded border border-moon/35 bg-black px-4 py-3">
+              <span className="flex items-center gap-1.5 text-[11px] font-medium text-neutral-400">
+                <span className={`inline-block h-2 w-2 rounded-full ${s.color}`} />
+                {s.label}
+              </span>
+              <p className={`mt-1 font-mono text-2xl font-bold ${s.text}`}>
+                {totals[s.key]}
+              </p>
+            </div>
+          ))}
         </section>
 
         {error && (
@@ -423,8 +410,8 @@ export default function DashboardApp({ businessId }: { businessId: number }) {
 
         {/* Contenedor principal de la gráfica */}
         <section className="mt-5 rounded border border-moon/35 bg-black p-4">
-          {/* Header de la gráfica + Leyenda */}
-          <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+          {/* Header de la gráfica + Leyenda (en su propia fila: son seis tipos) */}
+          <div className="flex flex-col gap-2">
             <div className="flex items-baseline gap-2">
               <h2 className="text-sm font-semibold text-white">
                 Frecuencia diaria de envíos
@@ -456,18 +443,12 @@ export default function DashboardApp({ businessId }: { businessId: number }) {
                   <span>
                     Total: <strong className="font-mono text-white">{dayTotal(hoveredDay)}</strong>
                   </span>
-                  <span className="text-moon">
-                    Inicial: <strong className="font-mono">{hoveredDay.initial}</strong>
-                  </span>
-                  <span className="text-moon/70">
-                    Recordatorio: <strong className="font-mono">{hoveredDay.reminder}</strong>
-                  </span>
-                  <span className="text-white">
-                    Final: <strong className="font-mono">{hoveredDay.final}</strong>
-                  </span>
-                  <span className="text-neutral-400">
-                    Diario: <strong className="font-mono">{hoveredDay.daily}</strong>
-                  </span>
+                  {SERIES.map((s) => (
+                    <span key={s.key} className={`flex items-center gap-1 ${s.text}`}>
+                      <span className={`inline-block h-1.5 w-1.5 rounded-full ${s.color}`} />
+                      {s.short}: <strong className="font-mono">{hoveredDay[s.key]}</strong>
+                    </span>
+                  ))}
                 </span>
               </>
             ) : (
@@ -524,29 +505,14 @@ export default function DashboardApp({ businessId }: { businessId: number }) {
                           className="flex w-full max-w-[20px] flex-col-reverse overflow-hidden rounded-t-sm shadow-sm transition-all group-hover:brightness-110 sm:max-w-[24px]"
                           style={{ height: `${barHeightPercent}%` }}
                         >
-                          {stat.initial > 0 && (
-                            <div
-                              className="w-full bg-moon transition-all"
-                              style={{ height: `${(stat.initial / total) * 100}%` }}
-                            />
-                          )}
-                          {stat.reminder > 0 && (
-                            <div
-                              className="w-full bg-moon/50 transition-all"
-                              style={{ height: `${(stat.reminder / total) * 100}%` }}
-                            />
-                          )}
-                          {stat.final > 0 && (
-                            <div
-                              className="w-full bg-white transition-all"
-                              style={{ height: `${(stat.final / total) * 100}%` }}
-                            />
-                          )}
-                          {stat.daily > 0 && (
-                            <div
-                              className="w-full bg-neutral-500 transition-all"
-                              style={{ height: `${(stat.daily / total) * 100}%` }}
-                            />
+                          {SERIES.map((s) =>
+                            stat[s.key] > 0 ? (
+                              <div
+                                key={s.key}
+                                className={`w-full ${s.color} transition-all`}
+                                style={{ height: `${(stat[s.key] / total) * 100}%` }}
+                              />
+                            ) : null,
                           )}
                         </div>
                       ) : (

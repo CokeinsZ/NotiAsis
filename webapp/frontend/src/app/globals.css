@@ -5,6 +5,10 @@
   --color-moon: #8fb8ff;
   /* Azul noche: burbujas de mensajes propios */
   --color-night: #16233d;
+  /* Dashboard: seguimiento del envío de Dropi (pedido enviado / en camino).
+     Validados contra el azul luna y el fondo negro (CVD y contraste). */
+  --color-ember: #d95926;
+  --color-aqua: #199e70;
   --font-sans: "Inter", ui-sans-serif, system-ui, sans-serif;
 }
 

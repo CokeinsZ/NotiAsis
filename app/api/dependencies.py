@@ -14,6 +14,7 @@ from app.services.associate_directory import AssociateDirectory
 from app.services.backend_client import RustBackendClient
 from app.services.dropi_client import N8nDropiClient
 from app.services.dropi_notifier import DropiNotificationService
+from app.services.dropi_tracking_notifier import DropiTrackingNotificationService
 from app.services.google_sheets import GoogleSheetClient
 from app.services.pdf_extractor import PdfTextExtractor
 from app.services.product_videos import ProductVideoLibrary
@@ -66,29 +67,44 @@ def get_sheet_notifier() -> SheetNotificationService:
     )
 
 
-@lru_cache
-def get_dropi_notifier() -> DropiNotificationService:
-    settings = get_settings()
+def _dropi_order_source(settings: Settings) -> N8nDropiClient:
     if not settings.n8n_api_key:
         # Los webhooks de N8N rechazan las peticiones sin api-key.
         raise HTTPException(status_code=503, detail="N8N_API_KEY no está configurado")
+    return N8nDropiClient(base_url=settings.dropi_n8n_url, api_key=settings.n8n_api_key)
 
-    # Timeout amplio: subir un video (hasta 16 MB) tarda más que un envío.
-    whatsapp_client = WhatsAppClient(
-        access_token=settings.whatsapp_token,
-        phone_number_id=settings.whatsapp_phone_id,
-        timeout=120,
-    )
-    return DropiNotificationService(
-        order_source=N8nDropiClient(base_url=settings.dropi_n8n_url, api_key=settings.n8n_api_key),
-        backend=get_backend_client(),
-        message_sender=whatsapp_client,
-        product_videos=ProductVideoLibrary(
-            media_dir=settings.media_dir,
-            uploader=whatsapp_client,
-            cache_path=settings.media_cache_path,
-            namespace=settings.whatsapp_phone_id,
+
+@lru_cache
+def get_product_videos() -> ProductVideoLibrary:
+    """Una sola biblioteca de videos para /notify-dropi-mcp y
+    /notify-dropi-tracking: su lock y su caché de media_ids son por
+    instancia, y con dos las corridas simultáneas subirían el mismo video
+    dos veces y se pisarían el archivo de caché."""
+    settings = get_settings()
+    return ProductVideoLibrary(
+        media_dir=settings.media_dir,
+        # Timeout amplio: subir un video (hasta 16 MB) tarda más que un envío.
+        uploader=WhatsAppClient(
+            access_token=settings.whatsapp_token,
+            phone_number_id=settings.whatsapp_phone_id,
+            timeout=120,
         ),
+        cache_path=settings.media_cache_path,
+        namespace=settings.whatsapp_phone_id,
+    )
+
+
+@lru_cache
+def get_dropi_notifier() -> DropiNotificationService:
+    settings = get_settings()
+    return DropiNotificationService(
+        order_source=_dropi_order_source(settings),
+        backend=get_backend_client(),
+        message_sender=WhatsAppClient(
+            access_token=settings.whatsapp_token,
+            phone_number_id=settings.whatsapp_phone_id,
+        ),
+        product_videos=get_product_videos(),
         debug_notification_number=settings.debug_notification_number,
         notification_override_number=settings.notification_override_number,
     )
@@ -97,6 +113,30 @@ def get_dropi_notifier() -> DropiNotificationService:
 @lru_cache
 def get_dropi_runs() -> RunGuard:
     """Corridas de /notify-dropi-mcp en curso, por business."""
+    return RunGuard()
+
+
+@lru_cache
+def get_dropi_tracking_notifier() -> DropiTrackingNotificationService:
+    settings = get_settings()
+    return DropiTrackingNotificationService(
+        order_source=_dropi_order_source(settings),
+        backend=get_backend_client(),
+        message_sender=WhatsAppClient(
+            access_token=settings.whatsapp_token,
+            phone_number_id=settings.whatsapp_phone_id,
+        ),
+        product_videos=get_product_videos(),
+        debug_notification_number=settings.debug_notification_number,
+        notification_override_number=settings.notification_override_number,
+    )
+
+
+@lru_cache
+def get_dropi_tracking_runs() -> RunGuard:
+    """Corridas de /notify-dropi-tracking en curso, por business. Aparte de
+    las de /notify-dropi-mcp: el job de cada 15 minutos no bloquea (ni
+    queda bloqueado por) la notificación de pedidos en oficina."""
     return RunGuard()
 
 

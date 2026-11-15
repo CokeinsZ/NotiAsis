@@ -13,6 +13,9 @@ BUTTON_TYPE = "button"
 # Estados de mensajes salientes que Meta reporta en los webhooks.
 SUPPORTED_STATUSES = ("sent", "delivered", "read")
 
+# Meta aceptó el mensaje pero no lo pudo entregar (trae `errors`).
+FAILED_STATUS = "failed"
+
 
 class WhatsAppWebhookProcessor:
     """Interpreta los eventos del webhook de Meta y dispara las acciones
@@ -21,6 +24,7 @@ class WhatsAppWebhookProcessor:
     - PDFs de guías enviados por asociados autorizados -> notificación.
     - Mensajes de usuarios finales -> historial del chat en el backend.
     - Actualizaciones de estado (sent/delivered/read) -> backend.
+    - Errores de envío (failed) -> backend (deshace la notificación de la guía).
     """
 
     def __init__(
@@ -62,8 +66,28 @@ class WhatsAppWebhookProcessor:
         for status in statuses:
             meta_message_id = status.get("id")
             state = status.get("status")
-            if meta_message_id and state in SUPPORTED_STATUSES:
+            if not meta_message_id:
+                continue
+            if state in SUPPORTED_STATUSES:
                 self._backend.update_message_status(meta_message_id, state)
+            elif state == FAILED_STATUS:
+                self._handle_failure(meta_message_id, status)
+
+    def _handle_failure(self, meta_message_id: str, status: dict) -> None:
+        """Meta aceptó el envío (HTTP 200) pero no lo entregó. El backend
+        guarda el error, deja el mensaje en 'failed' y, si era el de una
+        notificación de guía, la deshace: la próxima corrida del job la
+        vuelve a enviar (aquí no se reintenta)."""
+        errors = status.get("errors") or [{}]
+        error = errors[0] if isinstance(errors[0], dict) else {}
+        code = error.get("code")
+        print(f"Message {meta_message_id} failed: {code} {error.get('title')!r}")
+        self._backend.register_message_error(
+            meta_message_id,
+            error_code=code if isinstance(code, int) else None,
+            error_title=error.get("title"),
+            payload=status,
+        )
 
     def _handle_message(self, message: dict, contact_name: str | None) -> None:
         sender = message.get("from", "")

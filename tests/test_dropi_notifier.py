@@ -12,6 +12,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from pydantic import ValidationError
 
+from app.models.quota import QuotaReservation
 from app.api.dependencies import get_backend_client, get_dropi_notifier, get_dropi_runs
 from app.api.notify_dropi import NotifyDropiRequest, router as notify_dropi_router
 from app.core.phones import PhoneCountry
@@ -64,7 +65,7 @@ COLOMBIA = PhoneCountry("57", 10)
 
 
 class FakeBackend:
-    def __init__(self, guides=None, lookup_fails=False, country=COLOMBIA):
+    def __init__(self, guides=None, lookup_fails=False, country=COLOMBIA, quota_capacity=None, quota_fails=False):
         # guides: {número: guía con el formato de POST /guides/lookup}
         self.guides = guides or {}
         self.lookup_fails = lookup_fails
@@ -72,7 +73,13 @@ class FakeBackend:
         self.lookups = []
         self.registered = []
         self.notified = []
+        self.notified_messages = []  # mensaje ligado a cada marca
         self.outgoing = []
+        # Cupo de mensajería: None = aprueba todo.
+        self.quota_capacity = quota_capacity
+        self.quota_fails = quota_fails
+        self.quota_requests = []
+        self.quota_released = []
 
     def get_business_country(self, business_id):
         return self.country
@@ -91,8 +98,25 @@ class FakeBackend:
         self.guides[number] = guide(number, user_phone, count=0, business_id=business_id)
         return True
 
-    def mark_guide_notified(self, number):
+    def mark_guide_notified(self, number, meta_message_id=None):
         self.notified.append(number)
+        self.notified_messages.append(meta_message_id)
+
+    def reserve_quota(self, phones, kind, business_id, ttl_minutes):
+        self.quota_requests.append((list(phones), kind, business_id))
+        if self.quota_fails:
+            return None
+        approved = list(phones) if self.quota_capacity is None else list(phones)[: self.quota_capacity]
+        if self.quota_capacity is not None:
+            self.quota_capacity -= len(approved)
+        return QuotaReservation(
+            approved_phones=tuple(approved),
+            denied_phones=tuple(p for p in phones if p not in approved),
+            reservation_id=len(self.quota_requests) if approved else None,
+        )
+
+    def release_quota(self, reservation_id):
+        self.quota_released.append(reservation_id)
 
     def register_outgoing_message(self, **kwargs):
         self.outgoing.append(kwargs)
@@ -279,7 +303,7 @@ def test_orders_page_failure_processes_orders_already_fetched():
 
     assert report.total_orders == 2
     assert report.new_notifications == 2
-    assert "ordenes start=2" in report.errors
+    assert "ordenes RECLAME EN OFICINA start=2" in report.errors
 
 
 # ------------------------------ Escalación ------------------------------
@@ -314,6 +338,9 @@ def test_new_guide_sends_video_then_mensaje_guia_and_stores_order():
     assert [(m["media_type"], m["media_id"]) for m in backend.outgoing] == [("video", "media-asad"), ("text", None)]
     assert {m["guide_number"] for m in backend.outgoing} == {"240063856178"}
     assert backend.notified == ["240063856178"]
+    # Ligada al mensaje_guia_es, no al video: si Meta reporta que el
+    # mensaje_guia falló, el backend deshace el paso; si solo falla el video, no.
+    assert backend.notified_messages == ["wamid.dropi.2"]
 
 
 def test_new_guide_without_product_video_sends_only_mensaje_guia():
@@ -930,3 +957,82 @@ def test_client_gives_up_after_max_attempts():
     client = N8nDropiClient("https://n8n.test/webhook/dropi", api_key="k", session=session, sleep=lambda s: None)
     with pytest.raises(Exception):
         client.fetch_orders(1, OFFICE_STATUS, FROM, UNTIL, 100, 0)
+
+
+# ------------------------------ Cupo de mensajería ------------------------------
+
+
+def test_short_quota_sends_initial_notifications_first_and_defers_the_rest():
+    source = FakeDropiSource(
+        [office_order("1", "G1", phone="3000000001"), office_order("2", "G2", phone="3000000002"),
+         office_order("3", "G3", phone="3000000003")],
+        details={"3": order_detail("3", "G3")},
+    )
+    backend = FakeBackend({"G1": stored_guide("G1", 1, user_id="573000000001"),
+                           "G2": stored_guide("G2", 2, user_id="573000000002")}, quota_capacity=2)
+    service, backend, sender = build_service(source, backend)
+
+    report = service.notify_office_orders(BUSINESS_ID, FROM, UNTIL)
+
+    # Una sola reserva para la corrida, con el aviso inicial (G3) primero.
+    assert backend.quota_requests == [(["573000000003", "573000000001", "573000000002"], "office", BUSINESS_ID)]
+    assert sent_names(sender) == ["video_producto", "mensaje_guia_es", "recordatorio"]
+    assert backend.notified == ["G3", "G1"]
+    # G2 no se envía ni se marca: la próxima corrida lo reintenta.
+    assert report.deferred == ["G2"]
+    assert backend.quota_released == [1]
+
+
+def test_without_quota_dropi_is_not_queried_and_nothing_is_registered():
+    source = FakeDropiSource([office_order("1", "G1")], details={"1": order_detail("1", "G1")})
+    service, backend, sender = build_service(source, FakeBackend(quota_capacity=0))
+
+    report = service.notify_office_orders(BUSINESS_ID, FROM, UNTIL)
+
+    assert report.deferred == ["G1"]
+    assert sender.sent == []
+    assert source.order_calls == []
+    assert backend.registered == []
+    assert backend.notified == []
+    assert backend.quota_released == []  # no hubo reserva
+
+
+def test_without_quota_service_nothing_is_sent():
+    # Pasarse del límite hace que Meta rechace mensajes: sin backend, no se envía.
+    source = FakeDropiSource([office_order("1", "G1")], details={"1": order_detail("1", "G1")})
+    service, backend, sender = build_service(source, FakeBackend(quota_fails=True))
+
+    report = service.notify_office_orders(BUSINESS_ID, FROM, UNTIL)
+
+    assert sender.sent == []
+    assert report.deferred == ["G1"]
+    assert "backend: no se pudo reservar cupo de mensajería" in report.errors
+
+
+def test_initial_office_notification_skips_the_video_already_sent_in_tracking():
+    # La guía recibió el video en el nivel 1 del seguimiento.
+    source = FakeDropiSource([office_order("1", "G1")])
+    stored = stored_guide("G1", 0)
+    stored["video_sent"] = True
+    videos = FakeVideos()
+    service, backend, sender = build_service(source, FakeBackend({"G1": stored}), videos=videos)
+
+    report = service.notify_office_orders(BUSINESS_ID, FROM, UNTIL)
+
+    assert sent_names(sender) == ["mensaje_guia_es"]
+    assert videos.calls == []
+    assert report.new_notifications == 1
+    assert report.videos == 0
+    assert report.without_video == []  # no le faltó: ya lo tenía
+    assert backend.notified == ["G1"]
+
+
+def test_initial_office_notification_sends_the_video_if_tracking_did_not():
+    source = FakeDropiSource([office_order("1", "G1")])
+    stored = stored_guide("G1", 0)
+    stored["video_sent"] = False
+    service, backend, sender = build_service(source, FakeBackend({"G1": stored}))
+
+    service.notify_office_orders(BUSINESS_ID, FROM, UNTIL)
+
+    assert sent_names(sender) == ["video_producto", "mensaje_guia_es"]

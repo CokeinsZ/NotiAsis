@@ -1,3 +1,15 @@
+use once_cell::sync::Lazy;
+use regex::Regex;
+
+/// Teléfono válido, con o sin indicativo y '+' opcional: de 8 dígitos (el
+/// número nacional de Guatemala) a 15 (máximo internacional E.164). Es la
+/// misma regla para guías, mensajes y asociados: un teléfono que el bot ya
+/// usó para enviar una plantilla no debe ser rechazado al registrarla (sin
+/// la guía registrada, la notificación se repetiría en cada corrida).
+pub static PHONE_REGEX: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r"^\+?\d{8,15}$").unwrap()
+});
+
 /// Normaliza un número de teléfono al formato sin '+' (ej. 573001234567).
 /// Todos los números se guardan y comparan en este formato para evitar
 /// duplicados por diferencias de prefijo entre Meta, el LLM y los clientes.

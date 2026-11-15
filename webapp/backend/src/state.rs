@@ -5,6 +5,7 @@ use crate::businesses::service::BusinessServiceTrait;
 use crate::chats::service::ChatServiceTrait;
 use crate::guides::service::GuideServiceTrait;
 use crate::messages::service::MessageServiceTrait;
+use crate::quota::service::QuotaServiceTrait;
 use crate::users::service::UserServiceTrait;
 
 #[derive(Clone)]
@@ -55,5 +56,12 @@ pub struct MessageState {
 #[derive(Clone)]
 pub struct GuideState {
     pub guide_service: Arc<dyn GuideServiceTrait>,
+    pub global_state: Arc<AppState>,
+}
+
+/// Cupo de clientes nuevos en 24 h (límite de mensajería de Meta).
+#[derive(Clone)]
+pub struct QuotaState {
+    pub quota_service: Arc<dyn QuotaServiceTrait>,
     pub global_state: Arc<AppState>,
 }
