@@ -221,7 +221,7 @@ class RustBackendClient(NotificationBackend):
         media_id: str | None,
         timestamp: int | None,
         reply_to_meta_message_id: str | None = None,
-    ) -> None:
+    ) -> dict | None:
         try:
             response = self._request(
                 "POST",
@@ -239,10 +239,12 @@ class RustBackendClient(NotificationBackend):
             )
             if response.status_code == 404:
                 print(f"Incoming message from {user_phone} ignored: no chat registered yet.")
-                return
+                return None
             response.raise_for_status()
+            return response.json().get("data")
         except Exception as e:
             print(f"Error registering incoming message {meta_message_id}: {e}")
+            return None
 
     def register_outgoing_message(
         self,

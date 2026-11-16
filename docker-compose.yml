@@ -15,6 +15,9 @@ services:
       - NOTIFICATION_OVERRIDE_NUMBER=${NOTIFICATION_OVERRIDE_NUMBER:-}
       - DROPI_N8N_URL=${DROPI_N8N_URL:-}
       - N8N_API_KEY=${N8N_API_KEY:-}
+      # Agente de IA: el bot le avisa cada mensaje de cliente registrado.
+      - AI_AGENTS_URL=${AI_AGENTS_URL:-http://ai-agents:3002}
+      - AI_AGENTS_API_KEY=${AI_AGENTS_API_KEY:-}
     volumes:
       # Videos de producto: {MEDIA_HOST_DIR}/business/{id}/products/*.mp4
       - ${MEDIA_HOST_DIR:-/home/debian/vicky-v/media}:/data/media:ro
@@ -37,6 +40,28 @@ services:
       - MESSAGING_LIMIT=${MESSAGING_LIMIT:-230}
       - MESSAGING_TRACKING_LIMIT=${MESSAGING_TRACKING_LIMIT:-80}
       - PORT=3001
+    restart: unless-stopped
+
+  ai-agents:
+    build: ./ai-agents
+    container_name: notiasis-ai-agents
+    ports:
+      - 3002
+    environment:
+      - DATABASE_URL=${DATABASE_URL}
+      - AI_AGENTS_API_KEY=${AI_AGENTS_API_KEY}
+      - DEEPSEEK_API_KEY=${DEEPSEEK_API_KEY}
+      - GOOGLE_AI_API_KEY=${GOOGLE_AI_API_KEY}
+      - BACKEND_API_URL=${BACKEND_API_URL}
+      - BACKEND_API_KEY=${AI_AGENTS_BACKEND_API_KEY}
+      - DROPI_N8N_URL=${DROPI_N8N_URL:-}
+      - N8N_API_KEY=${N8N_API_KEY}
+      - CUSTOMER_AGENT_DRY_RUN=${CUSTOMER_AGENT_DRY_RUN:-false}
+      - CUSTOMER_AGENT_ALLOWED_PHONES=${CUSTOMER_AGENT_ALLOWED_PHONES:-}
+      - RUST_LOG=${RUST_LOG:-info}
+      - PORT=3002
+    depends_on:
+      - backend
     restart: unless-stopped
 
   frontend:

@@ -263,6 +263,10 @@ mod tests {
             Err("not implemented in fake".to_string())
         }
 
+        async fn send_ai_message(&self, _: i32, _: &str, _: SendMessageDto) -> Result<Message, String> {
+            Err("not implemented in fake".to_string())
+        }
+
         async fn send_free_media_message(
             &self,
             _: i32,
@@ -290,6 +294,7 @@ mod tests {
                 from_user: true,
                 created_at: chrono::Utc::now().naive_utc(),
                 guide_number: None,
+                sender: None,
             })
         }
 
@@ -306,6 +311,7 @@ mod tests {
                 from_user: false,
                 created_at: chrono::Utc::now().naive_utc(),
                 guide_number: dto.guide_number,
+                sender: None,
             })
         }
 

@@ -2,7 +2,7 @@ use async_trait::async_trait;
 use chrono::NaiveDateTime;
 
 use crate::messages::dtos::{
-    MediaType, Message, MessageFailure, MessageStatus, RegisterMessageErrorDto, UndoneNotification,
+    MediaType, Message, MessageFailure, MessageSender, MessageStatus, RegisterMessageErrorDto, UndoneNotification,
 };
 use crate::tools::message_lock::{is_permanent_error, lock_message};
 
@@ -47,6 +47,8 @@ pub struct NewMessage {
     /// Si es None, la base de datos usa CURRENT_TIMESTAMP.
     pub created_at: Option<NaiveDateTime>,
     pub guide_number: Option<String>,
+    /// Quién envió el mensaje saliente (None en los entrantes).
+    pub sender: Option<MessageSender>,
 }
 
 
@@ -96,7 +98,7 @@ impl MessageRepositoryTrait for PostgresMessageRepository {
         let query = r#"
             INSERT INTO messages (
                 meta_message_id, business_id, user_id,
-                media_id, media_type, message, status, from_user, created_at, guide_number
+                media_id, media_type, message, status, from_user, created_at, guide_number, sender
             ) VALUES (
                 $1, $2, $3, $4, $5, $6,
                 CASE
@@ -105,11 +107,11 @@ impl MessageRepositoryTrait for PostgresMessageRepository {
                     THEN 'failed'::message_status_enum
                     ELSE $7::message_status_enum
                 END,
-                $8, COALESCE($9::timestamp, CURRENT_TIMESTAMP), $10
+                $8, COALESCE($9::timestamp, CURRENT_TIMESTAMP), $10, $11
             )
             ON CONFLICT (meta_message_id) DO NOTHING
             RETURNING id, meta_message_id, business_id, user_id,
-                      media_id, media_type, message, status, from_user, created_at, guide_number
+                      media_id, media_type, message, status, from_user, created_at, guide_number, sender
         "#;
 
         let mut tx = self.db_pool.begin().await.map_err(|e| e.to_string())?;
@@ -126,6 +128,7 @@ impl MessageRepositoryTrait for PostgresMessageRepository {
             .bind(message.from_user)
             .bind(message.created_at)
             .bind(&message.guide_number)
+            .bind(message.sender.map(MessageSender::as_str))
             .fetch_optional(&mut *tx)
             .await
             .map_err(|e| e.to_string())?;
@@ -145,7 +148,7 @@ impl MessageRepositoryTrait for PostgresMessageRepository {
     async fn get_messages_by_chat(&self, business_id: i32, user_id: &str) -> Result<Vec<Message>, String> {
         let query = r#"
             SELECT id, meta_message_id, business_id, user_id,
-                   media_id, media_type, message, status, from_user, created_at, guide_number
+                   media_id, media_type, message, status, from_user, created_at, guide_number, sender
             FROM messages
             WHERE business_id = $1 AND user_id = $2
             ORDER BY created_at ASC, id ASC
@@ -256,7 +259,7 @@ impl MessageRepositoryTrait for PostgresMessageRepository {
     async fn find_by_meta_id(&self, meta_message_id: &str) -> Result<Option<Message>, String> {
         let query = r#"
             SELECT id, meta_message_id, business_id, user_id,
-                   media_id, media_type, message, status, from_user, created_at, guide_number
+                   media_id, media_type, message, status, from_user, created_at, guide_number, sender
             FROM messages WHERE meta_message_id = $1
         "#;
 

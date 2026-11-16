@@ -312,3 +312,77 @@ CREATE INDEX IF NOT EXISTS idx_guide_notifications_business_date ON guide_notifi
 CREATE INDEX IF NOT EXISTS idx_guide_notifications_guide ON guide_notifications (guide_number);
 CREATE INDEX IF NOT EXISTS idx_guide_notifications_message ON guide_notifications (meta_message_id) WHERE meta_message_id IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_guide_products_guide ON guide_products (guide_number);
+
+-- ===================== Agentes de IA (servicio ai-agents) =====================
+-- El agente responde a los clientes con mensajes libres. Lee el historial
+-- de `messages` (la misma fuente que la webapp) y envía sus respuestas por
+-- POST /chats/{bid}/{phone}/ai-messages, que las guarda con sender = 'ai'.
+
+-- Zona horaria de cada país: el agente ve las horas locales del cliente.
+ALTER TABLE countries ADD COLUMN IF NOT EXISTS timezone VARCHAR(64) NOT NULL DEFAULT 'America/Bogota';
+UPDATE countries SET timezone = 'America/Guatemala' WHERE code = 'GT' AND timezone = 'America/Bogota';
+
+-- Quién envió cada mensaje saliente: 'bot' (plantillas automáticas),
+-- 'associate' (un asesor desde la webapp) o 'ai' (el agente). NULL en los
+-- entrantes y en los salientes anteriores a esta columna. Un mensaje
+-- 'associate' calla al agente en ese chat (business_ai_agents.human_takeover_hours).
+ALTER TABLE messages ADD COLUMN IF NOT EXISTS sender VARCHAR(16);
+-- Transcripción de las notas de voz del cliente (la escribe ai-agents).
+ALTER TABLE messages ADD COLUMN IF NOT EXISTS transcription TEXT;
+
+-- Configuración del agente por business. Sin fila (o enabled = false) el
+-- agente no responde en los chats de ese business.
+CREATE TABLE IF NOT EXISTS business_ai_agents (
+	business_id INT PRIMARY KEY,
+	enabled BOOLEAN NOT NULL DEFAULT FALSE,
+	agent_name VARCHAR(64) NOT NULL DEFAULT 'Verónica',
+	-- Reglas del negocio para el prompt: días que la transportadora guarda
+	-- el pedido, medios de pago, qué hacer con cancelaciones...
+	policies TEXT NOT NULL DEFAULT '',
+	-- Horas que el agente se calla en un chat después de que escribe un asesor.
+	human_takeover_hours SMALLINT NOT NULL DEFAULT 12,
+	updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+
+	FOREIGN KEY (business_id) REFERENCES businesses(id)
+		ON DELETE CASCADE
+		ON UPDATE CASCADE
+);
+
+-- Conversaciones que el agente le pasó a un asesor (también marca el chat
+-- como importante). El agente se calla en el chat hasta que responda un
+-- asesor o pasen CUSTOMER_AGENT_ESCALATION_QUIET_HOURS.
+CREATE TABLE IF NOT EXISTS ai_escalations (
+	id SERIAL PRIMARY KEY,
+	business_id INT NOT NULL,
+	user_id VARCHAR(20) NOT NULL,
+	guide_number VARCHAR(20),
+	-- cancellation, shipping_issue, product_issue, product_question,
+	-- opt_out, complaint, human_requested, other
+	category VARCHAR(32) NOT NULL,
+	reason TEXT NOT NULL,
+	created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+
+	FOREIGN KEY (business_id, user_id) REFERENCES chats(business_id, user_id)
+		ON DELETE CASCADE
+		ON UPDATE CASCADE
+);
+
+-- Lo que el cliente le dijo al agente sobre una guía: 'will_pickup' (con
+-- promised_date), 'picked_up' o 'declined'.
+CREATE TABLE IF NOT EXISTS guide_customer_updates (
+	id SERIAL PRIMARY KEY,
+	guide_number VARCHAR(20) NOT NULL,
+	business_id INT NOT NULL,
+	user_id VARCHAR(20) NOT NULL,
+	kind VARCHAR(16) NOT NULL,
+	promised_date DATE,
+	note TEXT,
+	created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+
+	FOREIGN KEY (guide_number) REFERENCES guides(number)
+		ON DELETE CASCADE
+		ON UPDATE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_ai_escalations_chat ON ai_escalations (business_id, user_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_guide_customer_updates_guide ON guide_customer_updates (guide_number, created_at DESC);

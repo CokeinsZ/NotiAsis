@@ -202,12 +202,15 @@ class NotificationBackend(ABC):
         media_id: str | None,
         timestamp: int | None,
         reply_to_meta_message_id: str | None = None,
-    ) -> None:
+    ) -> dict | None:
         """Registra un mensaje entrante de un usuario final.
 
         `reply_to_meta_message_id` es el mensaje que el cliente citó al
         responder: el backend lo usa para saber a qué business y guía
         responde (un cliente puede tener chat con varios business).
+
+        Devuelve el mensaje guardado (`id`, `business_id`, `user_id`...) o
+        None si no se registró (sin chat o backend caído).
         """
 
     @abstractmethod
@@ -258,3 +261,13 @@ class NotificationBackend(ABC):
     @abstractmethod
     def release_quota(self, reservation_id: int) -> None:
         """Libera la reserva de cupo al terminar la corrida."""
+
+
+class CustomerMessageListener(ABC):
+    """Interesado en los mensajes de clientes ya registrados en el backend
+    (por ejemplo, el agente de IA que les responde)."""
+
+    @abstractmethod
+    def on_customer_message(self, message: dict) -> None:
+        """`message` es el mensaje que devolvió el backend al registrarlo.
+        No debe lanzar excepciones ni bloquear el webhook."""

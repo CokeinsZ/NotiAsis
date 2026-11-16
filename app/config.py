@@ -28,6 +28,10 @@ class Settings:
     # caché de sus media_id de WhatsApp. Rutas dentro del contenedor.
     media_dir: str = "/data/media"
     media_cache_path: str = "/data/state/whatsapp_media.json"
+    # Servicio ai-agents (agente de IA que responde a los clientes). Vacío =
+    # desactivado: los mensajes solo quedan en el historial.
+    ai_agents_url: str = ""
+    ai_agents_api_key: str = ""
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -49,4 +53,6 @@ class Settings:
             n8n_api_key=(os.getenv("N8N_API_KEY") or "").strip(),
             media_dir=os.getenv("MEDIA_DIR") or cls.media_dir,
             media_cache_path=os.getenv("MEDIA_CACHE_PATH") or cls.media_cache_path,
+            ai_agents_url=(os.getenv("AI_AGENTS_URL") or "").strip(),
+            ai_agents_api_key=(os.getenv("AI_AGENTS_API_KEY") or "").strip(),
         )

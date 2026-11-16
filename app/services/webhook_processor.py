@@ -1,6 +1,6 @@
-from typing import Iterator
+from typing import Iterable, Iterator
 
-from app.core.interfaces import NotificationBackend
+from app.core.interfaces import CustomerMessageListener, NotificationBackend
 from app.services.associate_directory import AssociateDirectory
 from app.services.shipping_notifier import ShippingNotificationService
 
@@ -22,7 +22,8 @@ class WhatsAppWebhookProcessor:
     de negocio correspondientes:
 
     - PDFs de guías enviados por asociados autorizados -> notificación.
-    - Mensajes de usuarios finales -> historial del chat en el backend.
+    - Mensajes de usuarios finales -> historial del chat en el backend y,
+      ya registrados, aviso a los `listeners` (el agente de IA).
     - Actualizaciones de estado (sent/delivered/read) -> backend.
     - Errores de envío (failed) -> backend (deshace la notificación de la guía).
     """
@@ -32,10 +33,12 @@ class WhatsAppWebhookProcessor:
         notifier: ShippingNotificationService,
         associate_directory: AssociateDirectory,
         backend: NotificationBackend,
+        listeners: Iterable[CustomerMessageListener] = (),
     ) -> None:
         self._notifier = notifier
         self._associate_directory = associate_directory
         self._backend = backend
+        self._listeners = tuple(listeners)
 
     def handle_event(self, data: dict) -> None:
         print(data)  # Debug
@@ -131,7 +134,7 @@ class WhatsAppWebhookProcessor:
         text, media_id = self._extract_content(message, message_type)
 
         timestamp = message.get("timestamp")
-        self._backend.register_incoming_message(
+        registered = self._backend.register_incoming_message(
             user_phone=user_phone,
             user_name=contact_name,
             meta_message_id=meta_message_id,
@@ -143,6 +146,11 @@ class WhatsAppWebhookProcessor:
             # dice a qué business y guía responde el cliente.
             reply_to_meta_message_id=(message.get("context") or {}).get("id"),
         )
+        # Solo los mensajes que quedaron en un chat (el backend eligió el
+        # business): sin chat no hay a quién responder.
+        if registered:
+            for listener in self._listeners:
+                listener.on_customer_message(registered)
 
     @staticmethod
     def _extract_content(message: dict, message_type: str) -> tuple[str | None, str | None]:
