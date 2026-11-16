@@ -1,10 +1,10 @@
 use ai_agents::app::{self, Services};
-use ai_agents::config::{ProcessEnv, Settings};
+use ai_agents::config::{ProcessEnv, Settings, load_dotenv};
 use ai_agents::observability;
 
 #[tokio::main]
 async fn main() {
-    dotenvy::dotenv().ok();
+    load_dotenv();
     observability::init();
 
     let settings = match Settings::from_env(&ProcessEnv) {

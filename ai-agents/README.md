@@ -96,12 +96,20 @@ sin parámetros: `audio/ogg`) y la configuración en
 - `customVocabulary`: productos, transportadoras, ciudades y nombre del
   cliente de ese chat, más `CUSTOMER_AGENT_VOCABULARY` (máx. 100).
 
-La documentación de Google muestra los ejemplos REST con `fileData` (archivo
-subido antes con la Files API) y no muestra uno inline; el formato `inlineData`
-es el estándar de `generateContent`. **Confírmalo con una nota de voz real
-antes de activarlo**: si Gemini lo rechazara, solo cambia
-`transcription/gemini/wire.rs`. Si una transcripción falla, el turno sigue y el
-historial dice `[nota de voz] (sin transcripción)`.
+La respuesta trae el texto en
+`candidates[0].content.parts[].audioTranscription.text`, **no** en
+`parts[].text` como los demás modelos de Gemini (`wire.rs` acepta los dos).
+Verificado con una nota de voz real de WhatsApp el 2026-11-15.
+
+Si una transcripción falla, el turno sigue y el historial dice
+`[nota de voz] (sin transcripción)`; la nota queda pendiente
+(`transcription IS NULL`) y se reintenta en el siguiente turno del chat.
+
+Para probar Gemini sin WhatsApp, con el mismo cliente y configuración:
+
+```bash
+cargo run --example transcribe_audio -- nota.ogg [vocabulario...]
+```
 
 ## Estructura
 

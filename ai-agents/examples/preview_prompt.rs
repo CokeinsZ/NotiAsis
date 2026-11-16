@@ -18,7 +18,7 @@ const USAGE: &str = "uso: cargo run --example preview_prompt -- <business_id> <t
 
 #[tokio::main]
 async fn main() {
-    dotenvy::dotenv().ok();
+    ai_agents::config::load_dotenv();
     let mut args = std::env::args().skip(1);
     let business_id: i32 = args.next().and_then(|value| value.parse().ok()).expect(USAGE);
     let phone = args.next().expect(USAGE);

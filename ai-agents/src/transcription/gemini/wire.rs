@@ -2,7 +2,9 @@
 //!
 //! Petición: el audio va inline en base64 (`inlineData`) y la
 //! configuración en `generationConfig.audioTranscriptionConfig`.
-//! Respuesta: el texto llega en `candidates[0].content.parts[].text`.
+//! Respuesta: el texto llega en
+//! `candidates[0].content.parts[].audioTranscription.text` (no en
+//! `parts[].text` como en los demás modelos de Gemini; se aceptan ambos).
 
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64;
@@ -105,9 +107,24 @@ struct WireResponseContent {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct WireResponsePart {
     #[serde(default)]
+    audio_transcription: Option<WireAudioTranscription>,
+    #[serde(default)]
     text: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct WireAudioTranscription {
+    #[serde(default)]
+    text: Option<String>,
+}
+
+impl WireResponsePart {
+    fn into_text(self) -> Option<String> {
+        self.audio_transcription.and_then(|transcription| transcription.text).or(self.text)
+    }
 }
 
 /// Texto del primer candidato (todas sus partes, en orden).
@@ -117,7 +134,7 @@ pub fn transcript_text(response: WireResponse) -> String {
         .into_iter()
         .next()
         .and_then(|candidate| candidate.content)
-        .map(|content| content.parts.into_iter().filter_map(|part| part.text).collect::<Vec<_>>().join(" "))
+        .map(|content| content.parts.into_iter().filter_map(WireResponsePart::into_text).collect::<Vec<_>>().join(" "))
         .unwrap_or_default()
         .trim()
         .to_string()
@@ -158,6 +175,26 @@ mod tests {
         let hints = TranscriptionHints { vocabulary: vec!["a".into(), "b".into()] };
         let body = serde_json::to_value(build_request(&config, &clip, &hints)).unwrap();
         assert_eq!(body["generationConfig"]["audioTranscriptionConfig"]["customVocabulary"], json!(["a"]));
+    }
+
+    #[test]
+    fn reads_the_audio_transcription_part() {
+        // Respuesta real de gemini-3.5-transcribe (2026-11-15).
+        let response: WireResponse = serde_json::from_value(json!({
+            "candidates": [{
+                "content": {
+                    "parts": [{"audioTranscription": {
+                        "text": "¿Cuánto es que vale ese producto y qué producto es que es?"
+                    }}],
+                    "role": "model"
+                },
+                "finishReason": "STOP",
+                "index": 0
+            }],
+            "modelVersion": "gemini-3.5-transcribe"
+        }))
+        .unwrap();
+        assert_eq!(transcript_text(response), "¿Cuánto es que vale ese producto y qué producto es que es?");
     }
 
     #[test]

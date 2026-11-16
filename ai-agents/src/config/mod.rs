@@ -2,11 +2,13 @@
 //! archivo; [`Settings`] solo las junta.
 
 mod customer_service;
+mod dotenv_file;
 mod env;
 mod integrations;
-mod models;
+pub mod models;
 mod server;
 
+pub use dotenv_file::load_dotenv;
 pub use env::{ConfigError, Env, EnvSource, MapEnv, ProcessEnv};
 pub use integrations::{BackendSettings, DropiSettings};
 pub use server::{DatabaseSettings, ServerSettings};
