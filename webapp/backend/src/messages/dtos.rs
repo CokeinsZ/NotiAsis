@@ -30,6 +30,28 @@ pub enum MessageStatus {
     Failed,
 }
 
+/// Quién envió un mensaje saliente (`messages.sender`).
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum MessageSender {
+    /// Plantillas automáticas del bot (notificaciones de guías).
+    Bot,
+    /// Un asesor desde la webapp. Calla al agente de IA en ese chat.
+    Associate,
+    /// El agente de IA (servicio ai-agents).
+    Ai,
+}
+
+impl MessageSender {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Bot => "bot",
+            Self::Associate => "associate",
+            Self::Ai => "ai",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[derive(sqlx::FromRow)]
 pub struct Message {
@@ -47,6 +69,10 @@ pub struct Message {
     /// Guía de la notificación (salientes) o de la notificación que el
     /// cliente citó al responder (entrantes).
     pub guide_number: Option<String>,
+    /// 'bot', 'associate' o 'ai' (ver [`MessageSender`]). NULL en los
+    /// entrantes y en los salientes anteriores a la columna.
+    #[sqlx(default)]
+    pub sender: Option<String>,
 }
 
 /// Mensaje libre que la webapp envía dentro de la ventana de 24h.

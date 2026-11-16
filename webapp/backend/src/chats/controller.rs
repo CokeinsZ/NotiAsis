@@ -8,7 +8,7 @@ use validator::Validate;
 
 use axum::routing::patch;
 
-use crate::auth::middleware::{AuthenticatedClaims, authorize_business};
+use crate::auth::middleware::{AuthenticatedClaims, authorize_business, require_bot};
 use crate::chats::dtos::{ChatFilters, SetImportanceDto};
 use crate::messages::dtos::{MediaType, SendMessageDto};
 use crate::state::ChatState;
@@ -99,14 +99,41 @@ async fn send_chat_message(
                 }),
             )
         }
-        Err(e) => {
-            let status = match e.as_str() {
-                "Chat not found" => StatusCode::NOT_FOUND,
-                e if e.contains("window is closed") => StatusCode::UNPROCESSABLE_ENTITY,
-                _ => StatusCode::BAD_REQUEST,
-            };
-            json_response(status, serde_json::json!({ "message": e }))
-        }
+        Err(e) => json_response(send_error_status(&e), serde_json::json!({ "message": e })),
+    }
+}
+
+/// Estado HTTP de un error al enviar un mensaje libre.
+fn send_error_status(error: &str) -> StatusCode {
+    match error {
+        "Chat not found" => StatusCode::NOT_FOUND,
+        e if e.contains("window is closed") => StatusCode::UNPROCESSABLE_ENTITY,
+        _ => StatusCode::BAD_REQUEST,
+    }
+}
+
+/// Respuesta del agente de IA (servicio ai-agents, token de api_key): se
+/// envía como mensaje libre dentro de la ventana de 24h y queda en el
+/// historial con `sender = 'ai'`, para que no cuente como un asesor.
+async fn send_ai_chat_message(
+    claims: AuthenticatedClaims,
+    State(state): State<ChatState>,
+    Path((business_id, user_phone)): Path<(i32, String)>,
+    Json(body): Json<SendMessageDto>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    if let Err(response) = require_bot(&claims.0) {
+        return response;
+    }
+    if let Err(errors) = body.validate() {
+        return build_validation_response(errors);
+    }
+
+    match state.message_service.send_ai_message(business_id, &user_phone, body).await {
+        Ok(message) => json_response(
+            StatusCode::CREATED,
+            serde_json::json!({ "message": "AI message sent", "data": message }),
+        ),
+        Err(e) => json_response(send_error_status(&e), serde_json::json!({ "message": e })),
     }
 }
 
@@ -317,6 +344,7 @@ pub fn chat_routes(state: ChatState) -> Router {
             "/{business_id}/{user_phone}/messages/media",
             axum::routing::post(send_chat_media_message).layer(DefaultBodyLimit::disable()),
         )
+        .route("/{business_id}/{user_phone}/ai-messages", axum::routing::post(send_ai_chat_message))
         .route("/{business_id}/{user_phone}/importance", patch(set_importance))
         .with_state(state)
 }
@@ -386,6 +414,24 @@ mod tests {
                 from_user: false,
                 created_at: chrono::Utc::now().naive_utc(),
                 guide_number: None,
+                sender: None,
+            })
+        }
+
+        async fn send_ai_message(&self, _: i32, _: &str, _: SendMessageDto) -> Result<Message, String> {
+            Ok(Message {
+                id: 1,
+                meta_message_id: "wamid.fake-ai".into(),
+                business_id: 1,
+                user_id: "573003579384".into(),
+                media_id: None,
+                media_type: crate::messages::dtos::MediaType::Text,
+                message: Some("hola".into()),
+                status: Some(MessageStatus::Sent),
+                from_user: false,
+                created_at: chrono::Utc::now().naive_utc(),
+                guide_number: None,
+                sender: Some("ai".into()),
             })
         }
 
@@ -418,6 +464,7 @@ mod tests {
                 from_user: false,
                 created_at: chrono::Utc::now().naive_utc(),
                 guide_number: None,
+                sender: None,
             })
         }
 
@@ -446,7 +493,8 @@ mod tests {
         }
     }
 
-    /// AuthService fake: acepta el token "valido" (business 7) y "otro" (business 9).
+    /// AuthService fake: acepta el token "valido" (business 7), "otro"
+    /// (business 9) y "bot" (api_key, acceso global).
     struct FakeAuthService;
 
     #[async_trait::async_trait]
@@ -482,6 +530,14 @@ mod tests {
                     sub: "alguien".into(),
                     kind: "associate".into(),
                     business_id: Some(9),
+                    phone_number: None,
+                    iat: 0,
+                    exp: usize::MAX,
+                }),
+                "bot" => Ok(Claims {
+                    sub: "ai-agents".into(),
+                    kind: "api_key".into(),
+                    business_id: None,
                     phone_number: None,
                     iat: 0,
                     exp: usize::MAX,
@@ -590,6 +646,40 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn ai_message_is_only_for_the_bot_token() {
+        let request = |token| authed_request(
+            "/7/573003579384/ai-messages",
+            "POST",
+            Some(token),
+            Some(r#"{"message": "Con gusto, Carmen"}"#.to_string()),
+        );
+
+        let response = create_routes().oneshot(request("valido")).await.unwrap();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+
+        let response = create_routes().oneshot(request("bot")).await.unwrap();
+        assert_eq!(response.status(), StatusCode::CREATED);
+        let body_bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let body_json: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
+        assert_eq!(body_json["data"]["sender"], "ai");
+        assert!(body_json.get("renewed_token").is_none());
+    }
+
+    #[tokio::test]
+    async fn ai_message_rejects_blank_text() {
+        let response = create_routes()
+            .oneshot(authed_request(
+                "/7/573003579384/ai-messages",
+                "POST",
+                Some("bot"),
+                Some(r#"{"message": "   "}"#.to_string()),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     }
 
     fn multipart_body(boundary: &str, parts: Vec<(&str, Option<(&str, &str, Vec<u8>)>, Option<String>)>) -> (String, Vec<u8>) {

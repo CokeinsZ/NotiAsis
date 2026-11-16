@@ -312,3 +312,145 @@ CREATE INDEX IF NOT EXISTS idx_guide_notifications_business_date ON guide_notifi
 CREATE INDEX IF NOT EXISTS idx_guide_notifications_guide ON guide_notifications (guide_number);
 CREATE INDEX IF NOT EXISTS idx_guide_notifications_message ON guide_notifications (meta_message_id) WHERE meta_message_id IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_guide_products_guide ON guide_products (guide_number);
+
+-- ===================== Agentes de IA (servicio ai-agents) =====================
+-- El agente responde a los clientes con mensajes libres. Lee el historial
+-- de `messages` (la misma fuente que la webapp) y envía sus respuestas por
+-- POST /chats/{bid}/{phone}/ai-messages, que las guarda con sender = 'ai'.
+
+-- Zona horaria de cada país: el agente ve las horas locales del cliente.
+ALTER TABLE countries ADD COLUMN IF NOT EXISTS timezone VARCHAR(64) NOT NULL DEFAULT 'America/Bogota';
+UPDATE countries SET timezone = 'America/Guatemala' WHERE code = 'GT' AND timezone = 'America/Bogota';
+
+-- Quién envió cada mensaje saliente: 'bot' (plantillas automáticas),
+-- 'associate' (un asesor desde la webapp) o 'ai' (el agente). NULL en los
+-- entrantes y en los salientes anteriores a esta columna. Un mensaje
+-- 'associate' calla al agente en ese chat (business_ai_agents.human_takeover_hours).
+ALTER TABLE messages ADD COLUMN IF NOT EXISTS sender VARCHAR(16);
+-- Salientes anteriores a la columna: son del bot los textos de sus
+-- plantillas (log_message() de app/whatsapp/templates/), el PDF de la guía
+-- y los videos de producto (el bot reutiliza el mismo media_id en muchos
+-- envíos); el resto lo escribió un asesor desde la webapp. Solo toca filas
+-- sin sender: el código actual siempre lo llena en los salientes.
+UPDATE messages m SET sender = CASE
+	WHEN m.media_type = 'text' AND (
+		m.message LIKE 'Es hora de recoger tu pedido%'
+		OR m.message LIKE '%Tu pedido te espera%'
+		OR m.message LIKE '%Reclama tu pedido%'
+		OR m.message LIKE '%Tu pedido esta en camino.%'
+		OR m.message LIKE '%Hablas con Veronica ¿Cómo estas?, estaba verificando%'
+		OR m.message LIKE '%¡tu pedido ya está listo para envío!%'
+	) THEN 'bot'
+	WHEN m.media_type = 'document' AND m.message = 'Guia de envio de tu pedido' THEN 'bot'
+	WHEN m.media_type = 'video' AND EXISTS (
+		SELECT 1 FROM messages o
+		WHERE o.media_id = m.media_id AND o.id <> m.id AND NOT o.from_user
+	) THEN 'bot'
+	ELSE 'associate'
+END
+WHERE NOT m.from_user AND m.sender IS NULL;
+-- Mensaje del mismo chat que el cliente citó al responder (o cuya
+-- plantilla tenía el botón que tocó). Sin llave foránea, como guide_number.
+ALTER TABLE messages ADD COLUMN IF NOT EXISTS reply_to_message_id INT;
+-- Transcripción de las notas de voz del cliente (la escribe ai-agents).
+ALTER TABLE messages ADD COLUMN IF NOT EXISTS transcription TEXT;
+
+-- Configuración del agente por business. Sin fila (o enabled = false) el
+-- agente no responde en los chats de ese business.
+CREATE TABLE IF NOT EXISTS business_ai_agents (
+	business_id INT PRIMARY KEY,
+	enabled BOOLEAN NOT NULL DEFAULT FALSE,
+	agent_name VARCHAR(64) NOT NULL DEFAULT 'Verónica',
+	-- Reglas del negocio para el prompt: días que la transportadora guarda
+	-- el pedido, medios de pago, qué hacer con cancelaciones...
+	policies TEXT NOT NULL DEFAULT '',
+	-- Horas que el agente se calla en un chat después de que escribe un asesor.
+	human_takeover_hours SMALLINT NOT NULL DEFAULT 8,
+	updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+
+	FOREIGN KEY (business_id) REFERENCES businesses(id)
+		ON DELETE CASCADE
+		ON UPDATE CASCADE
+);
+
+ALTER TABLE business_ai_agents ALTER COLUMN human_takeover_hours SET DEFAULT 8;
+
+-- Conversaciones que el agente le pasó a un asesor (también marca el chat
+-- como importante). El agente se calla en el chat hasta que responda un
+-- asesor o pasen CUSTOMER_AGENT_ESCALATION_QUIET_HOURS.
+CREATE TABLE IF NOT EXISTS ai_escalations (
+	id SERIAL PRIMARY KEY,
+	business_id INT NOT NULL,
+	user_id VARCHAR(20) NOT NULL,
+	guide_number VARCHAR(20),
+	-- cancellation, shipping_issue, product_issue, product_question,
+	-- opt_out, complaint, human_requested, other
+	category VARCHAR(32) NOT NULL,
+	reason TEXT NOT NULL,
+	created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+
+	FOREIGN KEY (business_id, user_id) REFERENCES chats(business_id, user_id)
+		ON DELETE CASCADE
+		ON UPDATE CASCADE
+);
+
+-- Lo que el cliente le dijo al agente sobre una guía: 'will_pickup' (con
+-- promised_date), 'picked_up' o 'declined'.
+CREATE TABLE IF NOT EXISTS guide_customer_updates (
+	id SERIAL PRIMARY KEY,
+	guide_number VARCHAR(20) NOT NULL,
+	business_id INT NOT NULL,
+	user_id VARCHAR(20) NOT NULL,
+	kind VARCHAR(16) NOT NULL,
+	promised_date DATE,
+	note TEXT,
+	created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+
+	FOREIGN KEY (guide_number) REFERENCES guides(number)
+		ON DELETE CASCADE
+		ON UPDATE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_ai_escalations_chat ON ai_escalations (business_id, user_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_guide_customer_updates_guide ON guide_customer_updates (guide_number, created_at DESC);
+
+-- Catálogo de productos de cada business: lo que el agente de IA le puede
+-- contar al cliente. Todos los campos de texto son opcionales; si uno está
+-- vacío, el agente no inventa ese dato (dice que lo consulta y escala).
+CREATE TABLE IF NOT EXISTS products (
+	id SERIAL PRIMARY KEY,
+	business_id INT NOT NULL REFERENCES businesses(id) ON DELETE CASCADE,
+	name VARCHAR(255) NOT NULL,
+	description TEXT,          -- para qué sirve
+	ingredients TEXT,
+	presentation TEXT,         -- p. ej. 'Frasco de 60 cápsulas blandas'
+	dosage TEXT,               -- p. ej. '2 cápsulas al día'
+	usage_instructions TEXT,   -- cómo y cuándo se toma o se usa
+	warnings TEXT,             -- precauciones y contraindicaciones
+	treatment_duration TEXT,   -- p. ej. '1 frasco: 2 meses; 2 frascos: 4 meses'
+	shipping TEXT,
+	warranty TEXT,
+	agent_notes TEXT,          -- indicaciones para el agente (no se le leen al cliente)
+	active BOOLEAN NOT NULL DEFAULT true,
+	created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+	updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+
+	UNIQUE (business_id, name),
+	UNIQUE (id, business_id)
+);
+
+-- Ids de producto de Dropi (guide_products.product_id) que corresponden a
+-- cada producto del catálogo: un mismo producto suele tener varias
+-- publicaciones en Dropi. Un id de Dropi apunta a un solo producto por
+-- business, y siempre a uno del mismo business.
+CREATE TABLE IF NOT EXISTS product_dropi_ids (
+	business_id INT NOT NULL,
+	dropi_product_id BIGINT NOT NULL,
+	product_id INT NOT NULL,
+
+	PRIMARY KEY (business_id, dropi_product_id),
+	FOREIGN KEY (product_id, business_id) REFERENCES products(id, business_id)
+		ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_product_dropi_ids_product ON product_dropi_ids (product_id);

@@ -7,3 +7,4 @@ webapp/frontend/.next
 *.sh
 /media/
 *.log.txt
+ai-agents/target

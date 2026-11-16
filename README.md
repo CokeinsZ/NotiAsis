@@ -86,6 +86,10 @@ El bot consume la API del backend (`BACKEND_API_URL`):
   2. Si no, va al chat del cliente con actividad más reciente (último
      mensaje enviado o recibido): a quien probablemente le está
      respondiendo.
+  Si el mensaje quedó en un chat y `AI_AGENTS_URL`/`AI_AGENTS_API_KEY`
+  están configurados, el bot avisa al agente de IA
+  (`POST {AI_AGENTS_URL}/agents/customer-service/events` con el `id` que
+  devolvió el backend). Ver [Agente de IA](#agente-de-ia-ai-agents).
 - **Teléfonos sin indicativo** (Dropi, Google Sheet, PDF): se completan
   con el país del business (`countries.phone_prefix` y `phone_length`,
   que el bot lee de `GET /businesses/{id}`). Un teléfono con otra
@@ -408,6 +412,31 @@ GET /quota                      (cupo actual, sin reservar)
   manual a un solo cliente y no tiene una corrida que lo reintente (igual
   cuenta en `used` una vez registrado).
 
+## Agente de IA (ai-agents)
+
+Servicio en Rust (`ai-agents/`) que responde a los clientes con mensajes
+libres: DeepSeek `deepseek-flash` (thinking y razonamiento al máximo) para
+conversar y Gemini 3.5 Transcribe para las notas de voz. Detalles,
+arquitectura y cómo extenderlo en [`ai-agents/README.md`](ai-agents/README.md).
+
+- **Historial**: el agente lee `messages` (lo mismo que la webapp), con cada
+  mensaje etiquetado: cliente, notificación automática, asesor o el propio
+  agente. No hay una memoria aparte que sincronizar.
+- **Quién envió cada mensaje** (`messages.sender`): `bot` (plantillas),
+  `associate` (webapp) o `ai`. Lo pone el backend al guardar.
+- **Respuestas**: por `POST /chats/{bid}/{phone}/ai-messages` (solo token
+  de api_key), así quedan en el historial y los estados de Meta funcionan
+  igual que con un asesor.
+- **Un asesor manda**: si un asesor escribe en un chat, el agente se calla
+  ahí `business_ai_agents.human_takeover_hours` (8 por defecto). Si el
+  agente escala un chat (`ai_escalations`), lo marca como importante y se
+  calla hasta que responda un asesor (máximo 8 h,
+  `CUSTOMER_AGENT_ESCALATION_QUIET_HOURS`).
+- **Se activa por business**: `business_ai_agents` (`enabled`,
+  `agent_name`, `policies` con las reglas del negocio para el prompt).
+- **Lo que dicen los clientes** ("lo recojo el lunes", "ya lo reclamé",
+  "no lo quiero") queda en `guide_customer_updates`.
+
 ## Agregar una nueva plantilla de WhatsApp
 
 Cada plantilla registrada en Meta Business tiene su propia clase en
@@ -458,6 +487,11 @@ número de copia de depuración (`DEBUG_NOTIFICATION_NUMBER`) y el desvío de
 notificaciones para pruebas (`NOTIFICATION_OVERRIDE_NUMBER`) son
 configurables por variables de entorno.
 
+`docker-compose.yml` le pasa a cada servicio todas las variables que lee su
+código, y solo esas (el frontend no recibe la base de datos ni el token de
+WhatsApp). Al agregar una variable en el código, agrégala también en el
+compose y en el `.env.example`, o el contenedor no la verá.
+
 ## Backend web (Rust + Axum + PostgreSQL)
 
 En `webapp/backend/`. API REST para la interfaz web (bandeja de chats,
@@ -507,7 +541,7 @@ Antes de correrlo en una base vieja:
 O todo junto con Docker (la DB puede ser externa, ej. Neon):
 
 ```bash
-docker compose up --build   # bot (:8000) + backend (:3000) + frontend (:3001)
+docker compose up --build   # bot (:8000) + backend (:3001) + ai-agents (:3002) + frontend (:3000)
 ```
 
 ## Frontend web (Next.js + React + Tailwind)
@@ -604,6 +638,7 @@ Solo para el bot (token de api_key; un asociado recibe 403) y la administración
 | DELETE | `/quota/reservations/{id}` | Liberar la reserva al terminar el envío (`released: false` si ya estaba liberada; 404 si no existe) |
 | POST | `/guides/{number}/notified` | Contar una notificación de oficina. Cuerpo opcional `{"meta_message_id"}`: el mensaje principal (`updated: false` si Meta ya lo reportó como fallido) |
 | POST | `/guides/{number}/tracking` | `{"level": 1\|2, "meta_message_id"}`: nivel de seguimiento del envío notificado. Solo sube (`updated: false` si ya tenía ese nivel o uno mayor, o si el mensaje ya falló); 404 si la guía no existe |
+| POST | `/chats/{business_id}/{user_phone}/ai-messages` | `{"message"}`: respuesta del agente de IA (servicio ai-agents). Mensaje libre dentro de la ventana de 24h (422 si está cerrada), guardado con `sender = 'ai'` |
 
 La sesión usa JWT en `localStorage` (15 min, renovado automáticamente al
 enviar mensajes libres). Pendiente: refresh tokens y cookies httpOnly para

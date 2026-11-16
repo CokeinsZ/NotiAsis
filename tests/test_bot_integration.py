@@ -65,6 +65,8 @@ class FakeBackend:
 
     def register_incoming_message(self, **kwargs):
         self.incoming.append(kwargs)
+        # Lo que devuelve el backend al registrarlo (None = sin chat).
+        return getattr(self, "registered_message", None)
 
     def register_outgoing_message(self, **kwargs):
         self.outgoing.append(kwargs)
@@ -289,11 +291,12 @@ def test_incomplete_recipient_is_not_notified():
 # ------------------------------ WhatsAppWebhookProcessor ------------------------------
 
 
-def build_processor(backend, notifier=None, directory=None):
+def build_processor(backend, notifier=None, directory=None, listeners=()):
     return WhatsAppWebhookProcessor(
         notifier=notifier or build_notifier(backend, FakeSender()),
         associate_directory=directory or AssociateDirectory({"573003579384": 1}),
         backend=backend,
+        listeners=listeners,
     )
 
 
@@ -729,3 +732,99 @@ def test_webhook_duplicate_guide_same_day_gets_nothing():
 
     assert result is False
     assert sender.sent == []  # nada: ya se notificó hoy
+
+
+# ------------------- Aviso al agente de IA (ai-agents) -------------------
+
+
+class RecordingListener:
+    def __init__(self):
+        self.messages = []
+
+    def on_customer_message(self, message):
+        self.messages.append(message)
+
+
+def user_text_event(text="Mañana paso por el pedido", sender="573009998887"):
+    return {"entry": [{"changes": [{"value": {"messages": [{
+        "from": sender, "id": "wamid.cliente1", "timestamp": "1787200338",
+        "type": "text", "text": {"body": text},
+    }]}}]}]}
+
+
+def test_registered_customer_message_is_sent_to_listeners():
+    backend = FakeBackend()
+    backend.registered_message = {"id": 10371, "business_id": 1, "user_id": "573009998887"}
+    listener = RecordingListener()
+    processor = build_processor(backend, listeners=[listener])
+
+    processor.handle_event(user_text_event())
+
+    assert listener.messages == [{"id": 10371, "business_id": 1, "user_id": "573009998887"}]
+
+
+def test_message_without_chat_is_not_sent_to_listeners():
+    backend = FakeBackend()  # register_incoming_message devuelve None (404 del backend)
+    listener = RecordingListener()
+    processor = build_processor(backend, listeners=[listener])
+
+    processor.handle_event(user_text_event())
+
+    assert len(backend.incoming) == 1
+    assert listener.messages == []
+
+
+def test_associate_messages_never_reach_listeners():
+    backend = FakeBackend()
+    backend.registered_message = {"id": 1, "business_id": 1, "user_id": "573003579384"}
+    listener = RecordingListener()
+    processor = build_processor(backend, listeners=[listener])
+
+    # 573003579384 es asociado: su texto no es de un cliente.
+    processor.handle_event(user_text_event(sender="573003579384"))
+
+    assert backend.incoming == []
+    assert listener.messages == []
+
+
+class FakeHttpResponse:
+    def __init__(self, status_code, text=""):
+        self.status_code = status_code
+        self.text = text
+
+
+class FakeHttpSession:
+    def __init__(self, response=None, error=None):
+        self.response = response or FakeHttpResponse(202)
+        self.error = error
+        self.calls = []
+
+    def post(self, url, json, headers, timeout):
+        self.calls.append((url, json, headers, timeout))
+        if self.error:
+            raise self.error
+        return self.response
+
+
+def test_ai_agents_client_posts_the_event_with_api_key():
+    from app.services.ai_agents_client import AiAgentsClient
+
+    session = FakeHttpSession()
+    client = AiAgentsClient("http://ai-agents:3002/", "secret", session=session)
+
+    client.on_customer_message({"id": 10371, "business_id": 1, "user_id": "573009998887", "message": "Hola"})
+
+    assert session.calls == [(
+        "http://ai-agents:3002/agents/customer-service/events",
+        {"message_id": 10371, "business_id": 1, "user_phone": "573009998887"},
+        {"api-key": "secret"},
+        5,
+    )]
+
+
+def test_ai_agents_client_never_raises():
+    from app.services.ai_agents_client import AiAgentsClient
+
+    message = {"id": 1, "business_id": 1, "user_id": "573009998887"}
+    AiAgentsClient("http://x", "k", session=FakeHttpSession(error=ConnectionError("down"))).on_customer_message(message)
+    AiAgentsClient("http://x", "k", session=FakeHttpSession(FakeHttpResponse(401, "bad key"))).on_customer_message(message)

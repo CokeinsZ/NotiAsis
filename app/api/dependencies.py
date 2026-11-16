@@ -10,6 +10,8 @@ from functools import lru_cache
 from fastapi import HTTPException
 
 from app.config import Settings
+from app.core.interfaces import CustomerMessageListener
+from app.services.ai_agents_client import AiAgentsClient
 from app.services.associate_directory import AssociateDirectory
 from app.services.backend_client import RustBackendClient
 from app.services.dropi_client import N8nDropiClient
@@ -140,6 +142,13 @@ def get_dropi_tracking_runs() -> RunGuard:
     return RunGuard()
 
 
+def _customer_message_listeners(settings: Settings) -> list[CustomerMessageListener]:
+    """Quién se entera de los mensajes de clientes ya registrados."""
+    if settings.ai_agents_url and settings.ai_agents_api_key:
+        return [AiAgentsClient(base_url=settings.ai_agents_url, api_key=settings.ai_agents_api_key)]
+    return []
+
+
 @lru_cache
 def get_webhook_processor() -> WhatsAppWebhookProcessor:
     settings = get_settings()
@@ -166,4 +175,5 @@ def get_webhook_processor() -> WhatsAppWebhookProcessor:
         notifier=notifier,
         associate_directory=directory,
         backend=backend,
+        listeners=_customer_message_listeners(settings),
     )

@@ -5,7 +5,7 @@ use chrono::{Duration, NaiveDateTime};
 
 use crate::chats::repository::ChatRepositoryTrait;
 use crate::messages::dtos::{
-    IncomingMessageDto, MediaType, Message, MessageFailure, MessageStatus, OutgoingMessageDto,
+    IncomingMessageDto, MediaType, Message, MessageFailure, MessageSender, MessageStatus, OutgoingMessageDto,
     RegisterMessageErrorDto, SendMessageDto,
 };
 use crate::messages::meta_client::MetaClientTrait;
@@ -314,6 +314,10 @@ impl VoiceTranscoderTrait for FfmpegVoiceTranscoder {
 pub trait MessageServiceTrait: Send + Sync {
     async fn get_chat_messages(&self, business_id: i32, user_phone: &str) -> Result<Vec<Message>, String>;
     async fn send_free_message(&self, business_id: i32, user_phone: &str, dto: SendMessageDto) -> Result<Message, String>;
+    /// Mensaje libre escrito por el agente de IA (servicio ai-agents): igual
+    /// que `send_free_message`, pero queda con `sender = 'ai'` y no cuenta
+    /// como la intervención de un asesor.
+    async fn send_ai_message(&self, business_id: i32, user_phone: &str, dto: SendMessageDto) -> Result<Message, String>;
     /// Envía un mensaje multimedia libre (imagen/video/audio/documento)
     /// dentro de la ventana de 24h: sube el archivo a Meta y luego envía
     /// el mensaje referenciando el media_id.
@@ -370,15 +374,10 @@ impl MessageService {
             voice_transcoder,
         }
     }
-}
 
-#[async_trait]
-impl MessageServiceTrait for MessageService {
-    async fn get_chat_messages(&self, business_id: i32, user_phone: &str) -> Result<Vec<Message>, String> {
-        self.message_repository.get_messages_by_chat(business_id, &normalize_phone(user_phone)).await
-    }
-
-    async fn send_free_message(&self, business_id: i32, user_phone: &str, dto: SendMessageDto) -> Result<Message, String> {
+    /// Envía un texto libre dentro de la ventana de 24 h y lo guarda con
+    /// quién lo envió.
+    async fn send_text(&self, business_id: i32, user_phone: &str, text: String, sender: MessageSender) -> Result<Message, String> {
         let user_phone = &normalize_phone(user_phone);
         let chat = self.chat_repository
             .get_chat(business_id, user_phone)
@@ -391,7 +390,7 @@ impl MessageServiceTrait for MessageService {
         }
 
         let meta_message_id = self.meta_client
-            .send_text_message(user_phone, &dto.message)
+            .send_text_message(user_phone, &text)
             .await?;
 
         let new_message = NewMessage {
@@ -400,14 +399,31 @@ impl MessageServiceTrait for MessageService {
             user_id: user_phone.to_string(),
             media_id: None,
             media_type: MediaType::Text,
-            message: Some(dto.message),
+            message: Some(text),
             status: Some(MessageStatus::Sent),
             from_user: false,
             created_at: None,
             guide_number: None,
+            sender: Some(sender),
+            reply_to_message_id: None,
         };
 
         self.message_repository.save_message(&new_message).await
+    }
+}
+
+#[async_trait]
+impl MessageServiceTrait for MessageService {
+    async fn get_chat_messages(&self, business_id: i32, user_phone: &str) -> Result<Vec<Message>, String> {
+        self.message_repository.get_messages_by_chat(business_id, &normalize_phone(user_phone)).await
+    }
+
+    async fn send_free_message(&self, business_id: i32, user_phone: &str, dto: SendMessageDto) -> Result<Message, String> {
+        self.send_text(business_id, user_phone, dto.message, MessageSender::Associate).await
+    }
+
+    async fn send_ai_message(&self, business_id: i32, user_phone: &str, dto: SendMessageDto) -> Result<Message, String> {
+        self.send_text(business_id, user_phone, dto.message, MessageSender::Ai).await
     }
 
     async fn send_free_media_message(
@@ -476,6 +492,8 @@ impl MessageServiceTrait for MessageService {
             from_user: false,
             created_at: None,
             guide_number: None,
+            sender: Some(MessageSender::Associate),
+            reply_to_message_id: None,
         };
 
         self.message_repository.save_message(&new_message).await
@@ -507,9 +525,9 @@ impl MessageServiceTrait for MessageService {
                 .await?
                 .ok_or_else(|| "Chat not found for user".to_string())?,
         };
-        let guide_number = replied
-            .filter(|message| message.business_id == business_id)
-            .and_then(|message| message.guide_number);
+        let replied = replied.filter(|message| message.business_id == business_id);
+        let reply_to_message_id = replied.as_ref().map(|message| message.id);
+        let guide_number = replied.and_then(|message| message.guide_number);
 
         let timestamp = dto.timestamp
             .and_then(|secs| chrono::DateTime::from_timestamp(secs, 0))
@@ -536,6 +554,8 @@ impl MessageServiceTrait for MessageService {
             from_user: true,
             created_at: Some(timestamp),
             guide_number,
+            sender: None,
+            reply_to_message_id,
         };
 
         self.message_repository.save_message(&new_message).await
@@ -563,6 +583,8 @@ impl MessageServiceTrait for MessageService {
             from_user: false,
             created_at: None,
             guide_number: dto.guide_number,
+            sender: Some(MessageSender::Bot),
+            reply_to_message_id: None,
         };
 
         self.message_repository.save_message(&new_message).await
@@ -645,6 +667,7 @@ mod tests {
                 from_user: message.from_user,
                 created_at: message.created_at.unwrap_or_else(|| chrono::Utc::now().naive_utc()),
                 guide_number: message.guide_number.clone(),
+                sender: message.sender.map(|sender| sender.as_str().to_string()),
             };
             self.rows.lock().unwrap().push(row.clone());
             self.saved.lock().unwrap().push(NewMessage {
@@ -658,6 +681,8 @@ mod tests {
                 from_user: message.from_user,
                 created_at: message.created_at,
                 guide_number: message.guide_number.clone(),
+                sender: message.sender,
+                reply_to_message_id: message.reply_to_message_id,
             });
             Ok(row)
         }
@@ -910,6 +935,32 @@ mod tests {
         assert_eq!(message_repo.saved.lock().unwrap().len(), 1);
     }
 
+    #[tokio::test]
+    async fn free_messages_record_who_sent_them() {
+        let recent = chrono::Utc::now().naive_utc() - Duration::hours(1);
+        let chats = vec![Chat { business_id: 1, user_id: "573003579384".into(), last_user_message_timestamp: Some(recent), last_user_message: None, is_important: false, last_guide_notification_at: None }];
+        let (service, message_repo, _, meta) = build_service(chats);
+
+        let associate = service.send_free_message(1, "573003579384", SendMessageDto { message: "Soy Ana".into() }).await.unwrap();
+        let ai = service.send_ai_message(1, "573003579384", SendMessageDto { message: "Con gusto".into() }).await.unwrap();
+
+        assert_eq!(associate.sender.as_deref(), Some("associate"));
+        assert_eq!(ai.sender.as_deref(), Some("ai"));
+        assert_eq!(message_repo.saved.lock().unwrap()[1].sender, Some(MessageSender::Ai));
+        assert_eq!(meta.sent.lock().unwrap().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn ai_message_respects_the_24h_window() {
+        let old = chrono::Utc::now().naive_utc() - Duration::hours(30);
+        let chats = vec![Chat { business_id: 1, user_id: "573003579384".into(), last_user_message_timestamp: Some(old), last_user_message: None, is_important: false, last_guide_notification_at: None }];
+        let (service, _, _, meta) = build_service(chats);
+
+        let result = service.send_ai_message(1, "573003579384", SendMessageDto { message: "Hola".into() }).await;
+        assert!(result.unwrap_err().contains("window is closed"));
+        assert!(meta.sent.lock().unwrap().is_empty());
+    }
+
     // ---------- Tests de register_incoming ----------
 
     #[tokio::test]
@@ -1035,7 +1086,11 @@ mod tests {
 
         assert_eq!(message.business_id, 2);
         assert_eq!(message.guide_number.as_deref(), Some("G-B2"));
-        assert_eq!(message_repo.saved.lock().unwrap()[2].guide_number.as_deref(), Some("G-B2"));
+        let saved = message_repo.saved.lock().unwrap();
+        assert_eq!(saved[2].guide_number.as_deref(), Some("G-B2"));
+        // Queda enlazado al mensaje citado (el agente de IA lo muestra).
+        let quoted_id = message_repo.rows.lock().unwrap()[1].id;
+        assert_eq!(saved[2].reply_to_message_id, Some(quoted_id));
     }
 
     #[tokio::test]
@@ -1052,7 +1107,7 @@ mod tests {
 
     #[tokio::test]
     async fn quote_of_another_users_message_is_ignored() {
-        let (service, _, _, _) = build_service(vec![]);
+        let (service, message_repo, _, _) = build_service(vec![]);
         service.register_outgoing(notification(1, "wamid.b1", "G-B1")).await.unwrap();
         let mut other_user = notification(2, "wamid.otro", "G-OTRO");
         other_user.user_phone = "573001112233".into();
@@ -1061,6 +1116,7 @@ mod tests {
         let message = service.register_incoming(reply("wamid.in", Some("wamid.otro"))).await.unwrap();
 
         assert_eq!((message.business_id, message.guide_number), (1, None));
+        assert_eq!(message_repo.saved.lock().unwrap()[2].reply_to_message_id, None);
     }
 
     #[tokio::test]
@@ -1081,6 +1137,7 @@ mod tests {
 
         assert!(!message.from_user);
         assert_eq!(message.status, Some(MessageStatus::Sent));
+        assert_eq!(message.sender.as_deref(), Some("bot"));
         assert!(chat_repo.chats.lock().unwrap().iter().any(|c| c.business_id == 3 && c.user_id == "573003579384"));
     }
 
