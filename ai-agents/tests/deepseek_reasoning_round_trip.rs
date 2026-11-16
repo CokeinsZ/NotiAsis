@@ -113,7 +113,7 @@ async fn reasoning_is_passed_back_so_the_tool_loop_succeeds() {
     assert_eq!(second[2]["reasoning_content"], "El cliente pregunta por su pedido: consulto la guía.");
     assert_eq!(second[3]["role"], "tool");
     assert_eq!(second[3]["tool_call_id"], "call_00_abc");
-    assert_eq!(second[3]["content"], r#"{"ciudad":"SILVANIA","guia":"240064842467"}"#);
+    assert_eq!(second[3]["content"], r#"{"guia":"240064842467","ciudad":"SILVANIA"}"#);
 }
 
 #[tokio::test]

@@ -175,6 +175,11 @@ async fn full_turn_transcribes_uses_tools_and_replies() {
     assert!(system.contains("$79.900"));
     assert!(user.contains("CLIENTE: [nota de voz] Voy el lunes por el pedido"), "{user}");
     assert!(user.contains("CLIENTE: Mañana paso"));
+    // La ficha del producto de su guía va en el prompt.
+    assert!(system.contains(r#""dosis": "2 cápsulas al día""#), "{system}");
+    assert!(system.contains(r#""notas_para_ti": "Habla de duración, no de cápsulas.""#));
+    assert!(!system.contains("Testosterone"), "only the customer's products go in the prompt");
+    assert!(system.contains("(nada: no has escalado este chat ni registrado novedades)"));
 
     // La herramienta escribió en la base, y la transcripción quedó guardada.
     let promised: NaiveDate =

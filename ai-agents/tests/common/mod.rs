@@ -30,7 +30,9 @@ pub async fn pool() -> Option<PgPool> {
 
 /// Business colombiano con un chat, una guía en oficina y su historial:
 /// 3 avisos de oficina (UTC 18:06 = 13:06 en Bogotá), un video, una nota de
-/// voz y un texto del cliente. El agente está activado.
+/// voz y un texto del cliente. El agente está activado. Catálogo: la
+/// Pimienta de Cayena (enlazada al id de Dropi de la guía), un producto
+/// sin enlace y uno inactivo.
 pub async fn seed(pool: &PgPool) -> (ChatKey, i32) {
     // Único entre corridas (microsegundos) y entre tests de una corrida (contador).
     let micros = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_micros();
@@ -56,6 +58,17 @@ pub async fn seed(pool: &PgPool) -> (ChatKey, i32) {
                     'SILVANIA', 'INTERRAPIDISIMO', 79900, 'COP', 3, '2026-11-08 18:06:00');
         INSERT INTO guide_products (guide_number, product_id, product_name, quantity)
             VALUES ('{guide}', 2240718, 'EXTRACTO PIMIENTA DE CAYENA 3000 Mg', 2);
+        WITH cayena AS (
+            INSERT INTO products (business_id, name, dosage, treatment_duration, agent_notes)
+            VALUES ({business_id}, 'Pimienta de Cayena (Cayenne Pepper)', '2 cápsulas al día',
+                    '1 frasco: 2 meses', 'Habla de duración, no de cápsulas.')
+            RETURNING id
+        )
+        INSERT INTO product_dropi_ids (business_id, dropi_product_id, product_id)
+            SELECT {business_id}, 2240718, id FROM cayena;
+        INSERT INTO products (business_id, name, description) VALUES
+            ({business_id}, 'Testosterone+ Advanced 15 en 1', 'Suplemento para hombre.');
+        INSERT INTO products (business_id, name, active) VALUES ({business_id}, 'Cayena descontinuada', false);
         INSERT INTO guide_notifications (guide_number, business_id, user_id, notification_step, kind, created_at) VALUES
             ('{guide}', {business_id}, '{phone}', 1, 'office', '2026-11-06 18:06:00'),
             ('{guide}', {business_id}, '{phone}', 2, 'office', '2026-11-07 18:06:00'),

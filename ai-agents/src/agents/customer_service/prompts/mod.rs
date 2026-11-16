@@ -5,7 +5,8 @@
 use crate::agent::Conversation;
 use crate::agents::customer_service::domain::{CustomerContext, TranscriptEntry};
 use crate::agents::customer_service::presentation::{
-    calendar::describe_moment, guides::guides_for_prompt, transcript::format_transcript,
+    calendar::describe_moment, case_history::case_history_for_prompt, guides::guides_for_prompt,
+    products::products_for_prompt, transcript::format_transcript,
 };
 use crate::shared::template::{PromptTemplate, TemplateError, TemplateValues};
 
@@ -49,6 +50,8 @@ impl PromptBuilder {
                 .with("fecha_local", describe_moment(context.business.local_now))
                 .with("nombre_whatsapp", display_name(&context.customer_name))
                 .with("pedidos", guides_for_prompt(&context.guides))
+                .with("productos", products_for_prompt(&context.products))
+                .with("casos", case_history_for_prompt(&context.history))
                 .with("politicas", policies),
         )?;
         let user = self.user.render(&TemplateValues::new().with("historial", format_transcript(transcript)))?;
@@ -83,6 +86,8 @@ mod tests {
             persona: AgentPersona { name: "Verónica".into(), policies: policies.into() },
             customer_name: "Carmen Buitrago".into(),
             guides: vec![],
+            products: vec![],
+            history: Default::default(),
         }
     }
 
@@ -96,6 +101,7 @@ mod tests {
             transcription: None,
             guide_number: None,
             failed: false,
+            quoted: None,
         }];
         let conversation = PromptBuilder::standard().conversation(&context(""), &transcript).unwrap();
         let [ChatMessage::System(system), ChatMessage::User(user)] = conversation.messages() else {
@@ -104,8 +110,23 @@ mod tests {
         assert!(system.starts_with("Eres Verónica, del equipo de atención al cliente de Victor Store (Colombia)."));
         assert!(system.contains("domingo 15 de noviembre de 2026, 3:41 p. m."));
         assert!(system.contains(DEFAULT_POLICIES));
+        assert!(system.contains("(no hay fichas de los productos de sus pedidos)"));
+        assert!(system.contains("(nada: no has escalado este chat ni registrado novedades)"));
         assert!(!system.contains("{{"), "unrendered placeholder in system prompt");
         assert!(user.contains("[dom 15/11 13:50] CLIENTE: Mañana con el favor de Dios"));
+    }
+
+    #[test]
+    fn product_sheets_are_in_the_system_prompt() {
+        let mut context = context("");
+        context.products = vec![crate::agents::customer_service::domain::ProductSheet {
+            name: "Pimienta de Cayena (Cayenne Pepper)".into(),
+            dosage: Some("2 cápsulas al día".into()),
+            ..Default::default()
+        }];
+        let conversation = PromptBuilder::standard().conversation(&context, &[]).unwrap();
+        let ChatMessage::System(system) = &conversation.messages()[0] else { panic!() };
+        assert!(system.contains(r#""dosis": "2 cápsulas al día""#), "{system}");
     }
 
     #[test]

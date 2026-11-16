@@ -2,13 +2,19 @@ use async_trait::async_trait;
 use chrono::NaiveDateTime;
 use sqlx::PgPool;
 
+use super::case_history::load_case_history;
 use super::guide_rows::{GuideRow, guide_columns};
-use crate::agents::customer_service::domain::{AgentPersona, BusinessProfile, CustomerContext};
+use super::product_rows::{ProductRow, product_columns};
+use crate::agents::customer_service::domain::{AgentPersona, BusinessProfile, CustomerContext, ProductSheet};
 use crate::agents::customer_service::ports::{CustomerContextReader, RepositoryError};
 use crate::domain::ChatKey;
 
 /// Nombre del agente si el business no configuró uno.
 const DEFAULT_AGENT_NAME: &str = "Verónica";
+/// Máximo de fichas de producto en el prompt.
+const PRODUCT_SHEET_LIMIT: i64 = 5;
+/// Máximo de escalamientos y de novedades anteriores en el prompt.
+const CASE_HISTORY_LIMIT: i64 = 10;
 
 const HEADER: &str = r#"
     SELECT
@@ -36,6 +42,25 @@ const GUIDES: &str = concat!(
     JOIN countries co ON co.id = b.country_id
     WHERE g.business_id = $1 AND g.user_id = $2
     ORDER BY coalesce(g.last_notification_timestamp, g.tracking_notified_at) DESC NULLS LAST, g.number
+    LIMIT $3
+    "#
+);
+
+/// Fichas del catálogo de los productos de las guías del cliente, enlazadas
+/// por el id de producto de Dropi (`product_dropi_ids`).
+const PRODUCTS: &str = concat!(
+    "SELECT ",
+    product_columns!(),
+    r#"
+    FROM products p
+    WHERE p.business_id = $1 AND p.active AND p.id IN (
+        SELECT l.product_id
+        FROM guides g
+        JOIN guide_products gp ON gp.guide_number = g.number
+        JOIN product_dropi_ids l ON l.business_id = g.business_id AND l.dropi_product_id = gp.product_id
+        WHERE g.business_id = $1 AND g.user_id = $2
+    )
+    ORDER BY p.name
     LIMIT $3
     "#
 );
@@ -73,7 +98,13 @@ impl CustomerContextReader for PgCustomerContextReader {
             .bind(&chat.user_phone)
             .bind(guide_limit)
             .fetch_all(&self.pool);
-        let (header, guides) = tokio::try_join!(header, guides)?;
+        let products = sqlx::query_as::<_, ProductRow>(PRODUCTS)
+            .bind(chat.business_id)
+            .bind(&chat.user_phone)
+            .bind(PRODUCT_SHEET_LIMIT)
+            .fetch_all(&self.pool);
+        let history = load_case_history(&self.pool, chat, CASE_HISTORY_LIMIT);
+        let (header, guides, products, history) = tokio::try_join!(header, guides, products, history)?;
 
         Ok(header.map(|header| CustomerContext {
             chat: chat.clone(),
@@ -89,6 +120,8 @@ impl CustomerContextReader for PgCustomerContextReader {
             },
             customer_name: header.customer_name,
             guides: guides.into_iter().map(|row| row.into_summary().0).collect(),
+            products: products.into_iter().map(ProductSheet::from).collect(),
+            history,
         }))
     }
 }

@@ -49,6 +49,8 @@ pub struct NewMessage {
     pub guide_number: Option<String>,
     /// Quién envió el mensaje saliente (None en los entrantes).
     pub sender: Option<MessageSender>,
+    /// Mensaje del mismo chat que el cliente citó al responder.
+    pub reply_to_message_id: Option<i32>,
 }
 
 
@@ -98,7 +100,8 @@ impl MessageRepositoryTrait for PostgresMessageRepository {
         let query = r#"
             INSERT INTO messages (
                 meta_message_id, business_id, user_id,
-                media_id, media_type, message, status, from_user, created_at, guide_number, sender
+                media_id, media_type, message, status, from_user, created_at, guide_number, sender,
+                reply_to_message_id
             ) VALUES (
                 $1, $2, $3, $4, $5, $6,
                 CASE
@@ -107,7 +110,7 @@ impl MessageRepositoryTrait for PostgresMessageRepository {
                     THEN 'failed'::message_status_enum
                     ELSE $7::message_status_enum
                 END,
-                $8, COALESCE($9::timestamp, CURRENT_TIMESTAMP), $10, $11
+                $8, COALESCE($9::timestamp, CURRENT_TIMESTAMP), $10, $11, $12
             )
             ON CONFLICT (meta_message_id) DO NOTHING
             RETURNING id, meta_message_id, business_id, user_id,
@@ -129,6 +132,7 @@ impl MessageRepositoryTrait for PostgresMessageRepository {
             .bind(message.created_at)
             .bind(&message.guide_number)
             .bind(message.sender.map(MessageSender::as_str))
+            .bind(message.reply_to_message_id)
             .fetch_optional(&mut *tx)
             .await
             .map_err(|e| e.to_string())?;

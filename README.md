@@ -428,9 +428,10 @@ arquitectura y cómo extenderlo en [`ai-agents/README.md`](ai-agents/README.md).
   de api_key), así quedan en el historial y los estados de Meta funcionan
   igual que con un asesor.
 - **Un asesor manda**: si un asesor escribe en un chat, el agente se calla
-  ahí `business_ai_agents.human_takeover_hours` (12 por defecto). Si el
+  ahí `business_ai_agents.human_takeover_hours` (8 por defecto). Si el
   agente escala un chat (`ai_escalations`), lo marca como importante y se
-  calla hasta que responda un asesor.
+  calla hasta que responda un asesor (máximo 8 h,
+  `CUSTOMER_AGENT_ESCALATION_QUIET_HOURS`).
 - **Se activa por business**: `business_ai_agents` (`enabled`,
   `agent_name`, `policies` con las reglas del negocio para el prompt).
 - **Lo que dicen los clientes** ("lo recojo el lunes", "ya lo reclamé",

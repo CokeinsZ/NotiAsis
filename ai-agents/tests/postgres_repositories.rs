@@ -12,12 +12,12 @@ use ai_agents::agents::customer_service::domain::{
 use ai_agents::agents::customer_service::eligibility::EligibilityGate;
 use ai_agents::agents::customer_service::policy::{ReplyPolicy, Verdict};
 use ai_agents::agents::customer_service::ports::{
-    ChatStateReader, CustomerContextReader, EscalationWriter, GuideReader, GuideUpdateWriter, TranscriptReader,
-    VoiceNoteStore,
+    ChatStateReader, CustomerContextReader, EscalationWriter, GuideReader, GuideUpdateWriter, ProductCatalog,
+    TranscriptReader, VoiceNoteStore,
 };
 use ai_agents::agents::customer_service::repositories::{
     PgChatStateReader, PgCustomerContextReader, PgEscalationWriter, PgGuideReader, PgGuideUpdateWriter,
-    PgTranscriptReader, PgVoiceNoteStore,
+    PgProductCatalog, PgTranscriptReader, PgVoiceNoteStore,
 };
 use ai_agents::domain::ChatKey;
 use chrono::{NaiveDate, Timelike};
@@ -36,7 +36,7 @@ async fn snapshot_and_policy_allow_a_fresh_message_and_stop_after_a_human_writes
     let snapshot = state.snapshot(&chat).await.unwrap().expect("chat exists");
     assert_eq!(snapshot.latest_incoming.unwrap().id, latest);
     assert!(snapshot.agent.unwrap().enabled);
-    assert_eq!(snapshot.agent.unwrap().human_takeover_hours, 12);
+    assert_eq!(snapshot.agent.unwrap().human_takeover_hours, 8);
     assert_eq!(snapshot.ai_replies_last_hour, 0);
 
     let gate = EligibilityGate::new(state.clone(), ReplyPolicy::standard(&CustomerServiceConfig::default()));
@@ -80,6 +80,46 @@ async fn customer_context_has_business_persona_and_guides_in_local_time() {
     assert_eq!(guide.order_total, Some(79_900.0));
     assert_eq!(guide.at_office_since, NaiveDate::from_ymd_opt(2026, 11, 6));
     assert!(context.vocabulary().contains(&"INTERRAPIDISIMO".to_string()));
+
+    // Solo la ficha enlazada al producto de su guía, con los datos que hay.
+    let names: Vec<&str> = context.products.iter().map(|product| product.name.as_str()).collect();
+    assert_eq!(names, ["Pimienta de Cayena (Cayenne Pepper)"]);
+    assert_eq!(context.products[0].dosage.as_deref(), Some("2 cápsulas al día"));
+    assert_eq!(context.products[0].ingredients, None);
+    assert!(context.vocabulary().contains(&"Pimienta de Cayena (Cayenne Pepper)".to_string()));
+}
+
+#[tokio::test]
+async fn catalog_has_the_active_products_of_its_business_only() {
+    let Some(pool) = pool().await else { return };
+    let (chat, _) = seed(&pool).await;
+    let (other_chat, _) = seed(&pool).await;
+    sqlx::query("UPDATE products SET name = 'Otro negocio' WHERE business_id = $1 AND name LIKE 'Testosterone%'")
+        .bind(other_chat.business_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let catalog = PgProductCatalog::new(pool.clone());
+    let names: Vec<String> =
+        catalog.products(chat.business_id).await.unwrap().into_iter().map(|product| product.name).collect();
+    assert_eq!(names, ["Pimienta de Cayena (Cayenne Pepper)", "Testosterone+ Advanced 15 en 1"]);
+
+    // Un id de Dropi solo se enlaza a un producto del mismo business.
+    let foreign_product: i32 =
+        sqlx::query_scalar("SELECT id FROM products WHERE business_id = $1 AND name = 'Otro negocio'")
+            .bind(other_chat.business_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    let cross_link = sqlx::query(
+        "INSERT INTO product_dropi_ids (business_id, dropi_product_id, product_id) VALUES ($1, 2311534, $2)",
+    )
+    .bind(chat.business_id)
+    .bind(foreign_product)
+    .execute(&pool)
+    .await;
+    assert!(cross_link.is_err(), "a Dropi id must link to a product of the same business");
 }
 
 #[tokio::test]
@@ -101,6 +141,79 @@ async fn transcript_is_chronological_with_authors_and_local_times() {
     let last_two = reader.recent(&chat, 2).await.unwrap();
     assert_eq!(last_two.len(), 2);
     assert_eq!(last_two[1].text.as_deref(), Some("Mañana paso"));
+}
+
+#[tokio::test]
+async fn a_reply_carries_the_message_it_quotes() {
+    let Some(pool) = pool().await else { return };
+    let (chat, _) = seed(&pool).await;
+    // El cliente responde citando el aviso de oficina (de días antes).
+    sqlx::query(
+        "INSERT INTO messages (meta_message_id, business_id, user_id, media_type, message, from_user, created_at, \
+                               reply_to_message_id)
+         SELECT 'wamid.q' || id, business_id, user_id, 'text', 'Hoy voy', true, now() AT TIME ZONE 'UTC', id
+         FROM messages WHERE business_id = $1 AND user_id = $2 AND sender = 'bot' AND media_type = 'text'",
+    )
+    .bind(chat.business_id)
+    .bind(&chat.user_phone)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let transcript = PgTranscriptReader::new(pool).recent(&chat, 40).await.unwrap();
+    let reply = transcript.last().unwrap();
+    assert_eq!(reply.text.as_deref(), Some("Hoy voy"));
+    let quoted = reply.quoted.as_ref().expect("quoted message");
+    assert_eq!(quoted.author, Author::Notification);
+    assert_eq!(quoted.text.as_deref(), Some("Es hora de recoger tu pedido"));
+    assert_eq!(quoted.at.hour(), 13, "local time of the quoted message");
+    assert!(transcript[0].quoted.is_none());
+}
+
+#[tokio::test]
+async fn context_has_past_escalations_and_updates_in_order() {
+    let Some(pool) = pool().await else { return };
+    let (chat, _) = seed(&pool).await;
+    let guide: String = sqlx::query_scalar("SELECT number FROM guides WHERE user_id = $1")
+        .bind(&chat.user_phone)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    let writer = PgGuideUpdateWriter::new(pool.clone());
+    let update = GuideUpdate {
+        guide_number: guide.clone(),
+        kind: GuideUpdateKind::WillPickup,
+        promised_date: NaiveDate::from_ymd_opt(2026, 11, 16),
+        note: Some("cobra el lunes".into()),
+    };
+    assert!(writer.record(&chat, &update).await.unwrap());
+    let escalation = Escalation {
+        category: EscalationCategory::ShippingIssue,
+        reason: "Quiere recibirlo en casa".into(),
+        guide_number: Some(guide.clone()),
+    };
+    PgEscalationWriter::new(pool.clone()).escalate(&chat, &escalation).await.unwrap();
+
+    let reader = PgCustomerContextReader::new(pool.clone());
+    let history = reader.load(&chat, 10).await.unwrap().unwrap().history;
+    assert_eq!(history.updates.len(), 1);
+    assert_eq!(history.updates[0].update, update);
+    assert_eq!(history.escalations.len(), 1);
+    assert_eq!(history.escalations[0].escalation, escalation);
+    assert!(!history.escalations[0].answered);
+
+    // Un asesor responde: el escalamiento queda atendido.
+    sqlx::query(
+        "INSERT INTO messages (meta_message_id, business_id, user_id, media_type, message, from_user, sender) \
+         VALUES ('wamid.asesor' || $2, $1, $2, 'text', 'Ya lo reviso', false, 'associate')",
+    )
+    .bind(chat.business_id)
+    .bind(&chat.user_phone)
+    .execute(&pool)
+    .await
+    .unwrap();
+    let history = reader.load(&chat, 10).await.unwrap().unwrap().history;
+    assert!(history.escalations[0].answered);
 }
 
 #[tokio::test]

@@ -1,6 +1,8 @@
 use chrono::NaiveDateTime;
 
+use super::case_history::CaseHistory;
 use super::guide::GuideSummary;
+use super::product::ProductSheet;
 use crate::domain::ChatKey;
 
 /// Todo lo que el agente sabe del chat antes de leer el historial.
@@ -13,6 +15,10 @@ pub struct CustomerContext {
     pub customer_name: String,
     /// Guías del cliente con este business, la más reciente primero.
     pub guides: Vec<GuideSummary>,
+    /// Fichas del catálogo de los productos de sus guías.
+    pub products: Vec<ProductSheet>,
+    /// Escalamientos y novedades anteriores del agente en este chat.
+    pub history: CaseHistory,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -43,6 +49,7 @@ impl CustomerContext {
             terms.extend(guide.city.clone());
             terms.extend(guide.customer_name.clone());
         }
+        terms.extend(self.products.iter().map(|product| product.name.clone()));
         terms.retain(|term| !term.trim().is_empty());
         terms
     }

@@ -27,9 +27,46 @@ pub fn normalize_phone(raw: &str) -> Option<String> {
     valid.then(|| trimmed.to_string())
 }
 
+/// Palabras que no distinguen un nombre de otro.
+const CONNECTORS: &[&str] =
+    &["a", "al", "and", "con", "de", "del", "el", "en", "la", "las", "los", "of", "para", "por", "the", "x", "y"];
+
+/// Palabras para comparar nombres: minúsculas, sin tildes, sin signos ni
+/// conectores. `"Pimienta de Cayena (Cayenne Pepper)"` →
+/// `["pimienta", "cayena", "cayenne", "pepper"]`.
+pub fn search_words(text: &str) -> Vec<String> {
+    text.to_lowercase()
+        .chars()
+        .map(without_accent)
+        .collect::<String>()
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|word| !word.is_empty() && !CONNECTORS.contains(word))
+        .map(str::to_string)
+        .collect()
+}
+
+fn without_accent(c: char) -> char {
+    match c {
+        'á' | 'à' | 'ä' | 'â' => 'a',
+        'é' | 'è' | 'ë' | 'ê' => 'e',
+        'í' | 'ì' | 'ï' | 'î' => 'i',
+        'ó' | 'ò' | 'ö' | 'ô' => 'o',
+        'ú' | 'ù' | 'ü' | 'û' => 'u',
+        'ñ' => 'n',
+        other => other,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn search_words_drop_accents_signs_and_connectors() {
+        assert_eq!(search_words("Pimienta de Cayena (Cayenne Pepper)"), ["pimienta", "cayena", "cayenne", "pepper"]);
+        assert_eq!(search_words("Testosterone+ ADVANCED 15 en 1"), ["testosterone", "advanced", "15", "1"]);
+        assert_eq!(search_words("Combo perfumes árabes"), ["combo", "perfumes", "arabes"]);
+    }
 
     #[test]
     fn truncate_respects_multibyte_characters() {

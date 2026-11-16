@@ -62,6 +62,19 @@ pub struct TranscriptEntry {
     pub guide_number: Option<String>,
     /// Meta no lo entregó: el cliente nunca lo vio.
     pub failed: bool,
+    /// El mensaje que el cliente citó al responder (puede ser anterior al
+    /// historial que ve el agente).
+    pub quoted: Option<QuotedMessage>,
+}
+
+/// Un mensaje citado, con lo necesario para mostrar de qué se habla.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct QuotedMessage {
+    pub at: NaiveDateTime,
+    pub author: Author,
+    pub media: MediaKind,
+    pub text: Option<String>,
+    pub transcription: Option<String>,
 }
 
 /// Nota de voz del cliente aún sin transcribir.

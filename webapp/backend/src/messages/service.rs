@@ -405,6 +405,7 @@ impl MessageService {
             created_at: None,
             guide_number: None,
             sender: Some(sender),
+            reply_to_message_id: None,
         };
 
         self.message_repository.save_message(&new_message).await
@@ -492,6 +493,7 @@ impl MessageServiceTrait for MessageService {
             created_at: None,
             guide_number: None,
             sender: Some(MessageSender::Associate),
+            reply_to_message_id: None,
         };
 
         self.message_repository.save_message(&new_message).await
@@ -523,9 +525,9 @@ impl MessageServiceTrait for MessageService {
                 .await?
                 .ok_or_else(|| "Chat not found for user".to_string())?,
         };
-        let guide_number = replied
-            .filter(|message| message.business_id == business_id)
-            .and_then(|message| message.guide_number);
+        let replied = replied.filter(|message| message.business_id == business_id);
+        let reply_to_message_id = replied.as_ref().map(|message| message.id);
+        let guide_number = replied.and_then(|message| message.guide_number);
 
         let timestamp = dto.timestamp
             .and_then(|secs| chrono::DateTime::from_timestamp(secs, 0))
@@ -553,6 +555,7 @@ impl MessageServiceTrait for MessageService {
             created_at: Some(timestamp),
             guide_number,
             sender: None,
+            reply_to_message_id,
         };
 
         self.message_repository.save_message(&new_message).await
@@ -581,6 +584,7 @@ impl MessageServiceTrait for MessageService {
             created_at: None,
             guide_number: dto.guide_number,
             sender: Some(MessageSender::Bot),
+            reply_to_message_id: None,
         };
 
         self.message_repository.save_message(&new_message).await
@@ -678,6 +682,7 @@ mod tests {
                 created_at: message.created_at,
                 guide_number: message.guide_number.clone(),
                 sender: message.sender,
+                reply_to_message_id: message.reply_to_message_id,
             });
             Ok(row)
         }
@@ -1081,7 +1086,11 @@ mod tests {
 
         assert_eq!(message.business_id, 2);
         assert_eq!(message.guide_number.as_deref(), Some("G-B2"));
-        assert_eq!(message_repo.saved.lock().unwrap()[2].guide_number.as_deref(), Some("G-B2"));
+        let saved = message_repo.saved.lock().unwrap();
+        assert_eq!(saved[2].guide_number.as_deref(), Some("G-B2"));
+        // Queda enlazado al mensaje citado (el agente de IA lo muestra).
+        let quoted_id = message_repo.rows.lock().unwrap()[1].id;
+        assert_eq!(saved[2].reply_to_message_id, Some(quoted_id));
     }
 
     #[tokio::test]
@@ -1098,7 +1107,7 @@ mod tests {
 
     #[tokio::test]
     async fn quote_of_another_users_message_is_ignored() {
-        let (service, _, _, _) = build_service(vec![]);
+        let (service, message_repo, _, _) = build_service(vec![]);
         service.register_outgoing(notification(1, "wamid.b1", "G-B1")).await.unwrap();
         let mut other_user = notification(2, "wamid.otro", "G-OTRO");
         other_user.user_phone = "573001112233".into();
@@ -1107,6 +1116,7 @@ mod tests {
         let message = service.register_incoming(reply("wamid.in", Some("wamid.otro"))).await.unwrap();
 
         assert_eq!((message.business_id, message.guide_number), (1, None));
+        assert_eq!(message_repo.saved.lock().unwrap()[2].reply_to_message_id, None);
     }
 
     #[tokio::test]

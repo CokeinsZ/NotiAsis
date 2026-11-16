@@ -1,11 +1,15 @@
 use super::calendar::short_stamp;
-use crate::agents::customer_service::domain::{Author, MediaKind, TranscriptEntry};
+use crate::agents::customer_service::domain::{Author, MediaKind, QuotedMessage, TranscriptEntry};
+use crate::shared::text::truncate_chars;
+
+/// Caracteres del mensaje citado que se muestran.
+const QUOTE_CHARS: usize = 120;
 
 /// Historial del chat como texto, una línea por mensaje:
 ///
 /// ```text
 /// [dom 15/11 13:09] NOTIFICACIÓN AUTOMÁTICA · guía 240064842467: Hola Carmen...
-/// [dom 15/11 13:50] CLIENTE: Mañana con el favor de Dios
+/// [dom 15/11 13:50] CLIENTE (cita a ASESOR HUMANO del dom 15/11 13:20: «¿Me envías una foto?»): Ya te la mando
 /// ```
 pub fn format_transcript(entries: &[TranscriptEntry]) -> String {
     if entries.is_empty() {
@@ -22,7 +26,19 @@ pub fn format_entry(entry: &TranscriptEntry) -> String {
     if entry.failed {
         header.push_str(" · NO ENTREGADO");
     }
-    format!("{header}: {}", body(entry))
+    if let Some(quoted) = &entry.quoted {
+        header.push_str(&format!(" ({})", quote(quoted)));
+    }
+    format!("{header}: {}", body(entry.author, &entry.media, entry.text.as_deref(), entry.transcription.as_deref()))
+}
+
+/// `cita a ASESOR HUMANO del dom 15/11 13:20: «...»`, en una línea.
+fn quote(quoted: &QuotedMessage) -> String {
+    let content = body(quoted.author, &quoted.media, quoted.text.as_deref(), quoted.transcription.as_deref());
+    let flat = content.split_whitespace().collect::<Vec<_>>().join(" ");
+    let excerpt = truncate_chars(&flat, QUOTE_CHARS);
+    let ellipsis = if excerpt.len() < flat.len() { "…" } else { "" };
+    format!("cita a {} del {}: «{excerpt}{ellipsis}»", author_label(quoted.author), short_stamp(quoted.at))
 }
 
 fn author_label(author: Author) -> &'static str {
@@ -34,23 +50,18 @@ fn author_label(author: Author) -> &'static str {
     }
 }
 
-fn body(entry: &TranscriptEntry) -> String {
-    let from_customer = entry.author == Author::Customer;
-    let caption = entry.text.as_deref().map(str::trim).filter(|text| !text.is_empty());
+fn body(author: Author, media: &MediaKind, text: Option<&str>, transcription: Option<&str>) -> String {
+    let from_customer = author == Author::Customer;
+    let caption = text.map(str::trim).filter(|text| !text.is_empty());
     let with_caption = |label: &str| match caption {
         Some(text) => format!("{label} {text}"),
         None => label.to_string(),
     };
-    match &entry.media {
+    match media {
         MediaKind::Text => caption.unwrap_or("").to_string(),
         MediaKind::Audio => format!(
             "[nota de voz] {}",
-            entry
-                .transcription
-                .as_deref()
-                .map(str::trim)
-                .filter(|text| !text.is_empty())
-                .unwrap_or("(sin transcripción)")
+            transcription.map(str::trim).filter(|text| !text.is_empty()).unwrap_or("(sin transcripción)")
         ),
         MediaKind::Image => with_caption("[imagen]"),
         MediaKind::Video if from_customer => with_caption("[video]"),
@@ -75,7 +86,28 @@ mod tests {
             transcription: None,
             guide_number: None,
             failed: false,
+            quoted: None,
         }
+    }
+
+    #[test]
+    fn a_reply_shows_the_quoted_message_in_one_line() {
+        let mut reply = entry(Author::Customer, MediaKind::Text, Some("Ya te la mando"));
+        reply.quoted = Some(QuotedMessage {
+            at: NaiveDate::from_ymd_opt(2026, 11, 15).unwrap().and_hms_opt(13, 20, 0).unwrap(),
+            author: Author::Associate,
+            media: MediaKind::Text,
+            text: Some("¿Me envías\nuna foto?".into()),
+            transcription: None,
+        });
+        assert_eq!(
+            format_entry(&reply),
+            "[dom 15/11 13:50] CLIENTE (cita a ASESOR HUMANO del dom 15/11 13:20: «¿Me envías una foto?»): Ya te la mando"
+        );
+
+        let long = "x".repeat(200);
+        reply.quoted.as_mut().unwrap().text = Some(long);
+        assert!(format_entry(&reply).contains(&format!("«{}…»", "x".repeat(120))));
     }
 
     #[test]

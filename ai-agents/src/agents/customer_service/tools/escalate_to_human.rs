@@ -27,7 +27,8 @@ impl EscalateToHumanTool {
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct EscalateToHumanArgs {
     /// cancellation: quiere cancelar o no recogerá a tiempo; shipping_issue: dirección, ciudad u oficina;
-    /// product_issue: producto dañado, distinto o no pedido, o cobro diferente; product_question: uso o dosis;
+    /// product_issue: producto dañado, distinto o no pedido, cobro diferente o una reacción al tomarlo;
+    /// product_question: un dato del producto que no está en su ficha;
     /// opt_out: no quiere más mensajes; complaint: molesto o grosero; human_requested: pidió una persona; other.
     pub categoria: EscalationCategory,
     /// Motivo en una frase, para el asesor.

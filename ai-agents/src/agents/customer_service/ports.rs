@@ -5,7 +5,8 @@
 use async_trait::async_trait;
 
 use super::domain::{
-    ChatSnapshot, CustomerContext, Escalation, GuideDetails, GuideUpdate, PendingVoiceNote, TranscriptEntry,
+    ChatSnapshot, CustomerContext, Escalation, GuideDetails, GuideUpdate, PendingVoiceNote, ProductSheet,
+    TranscriptEntry,
 };
 use crate::domain::ChatKey;
 use crate::integrations::backend::BackendError;
@@ -45,6 +46,12 @@ pub trait GuideReader: Send + Sync {
     /// Una guía del cliente del chat. `None` si no existe o es de otro
     /// cliente o business.
     async fn details(&self, chat: &ChatKey, guide_number: &str) -> Result<Option<GuideDetails>, RepositoryError>;
+}
+
+#[async_trait]
+pub trait ProductCatalog: Send + Sync {
+    /// Productos activos del catálogo del business, por nombre.
+    async fn products(&self, business_id: i32) -> Result<Vec<ProductSheet>, RepositoryError>;
 }
 
 #[async_trait]

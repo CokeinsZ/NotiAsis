@@ -18,7 +18,7 @@ use super::ports::ReplyDelivery;
 use super::prompts::PromptBuilder;
 use super::repositories::{
     PgChatStateReader, PgCustomerContextReader, PgEscalationWriter, PgGuideReader, PgGuideUpdateWriter,
-    PgTranscriptReader, PgVoiceNoteStore,
+    PgProductCatalog, PgTranscriptReader, PgVoiceNoteStore,
 };
 use super::steps::{
     CheckEligibility, DeliverReply, GenerateReply, LoadCustomerContext, LoadTranscript, LockChat, ReserveCapacity,
@@ -68,6 +68,7 @@ pub fn build_pipeline(config: &CustomerServiceConfig, deps: CustomerServiceDeps)
         guide_updates: Arc::new(PgGuideUpdateWriter::new(pool.clone())),
         escalations: Arc::new(PgEscalationWriter::new(pool.clone())),
         orders: deps.orders,
+        products: Arc::new(PgProductCatalog::new(pool.clone())),
     });
     let runner = Arc::new(AgentRunner::new(deps.chat_model, tools, config.max_tool_rounds));
     let delivery: Arc<dyn ReplyDelivery> =

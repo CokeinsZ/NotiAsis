@@ -37,10 +37,10 @@ impl Default for CustomerServiceConfig {
         Self {
             quiet_period: Duration::from_secs(15),
             max_tool_rounds: 8,
-            history_limit: 40,
+            history_limit: 100,
             guide_limit: 10,
             max_replies_per_hour: 6,
-            escalation_quiet_hours: 24,
+            escalation_quiet_hours: 8,
             allowed_phones: HashSet::new(),
             max_concurrent_turns: 8,
             max_voice_notes_per_turn: 5,

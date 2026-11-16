@@ -18,9 +18,9 @@ ai-agents (202 inmediato, turno en segundo plano):
   2. lock_chat               un turno a la vez por chat
   3. check_eligibility       reglas de policy/ (ver abajo)
   4. reserve_capacity        tope de turnos simultáneos con el modelo
-  5. load_customer_context   business, persona, políticas y guías del cliente
+  5. load_customer_context   business, persona, políticas, guías y fichas de sus productos
   6. transcribe_voice_notes  notas de voz pendientes → messages.transcription (Gemini)
-  7. load_transcript         últimos 40 mensajes de `messages`
+  7. load_transcript         últimos 100 mensajes de `messages` (con el mensaje que cita cada uno)
   8. generate_reply          DeepSeek + herramientas → texto o [NO_RESPONDER]
   9. deliver_reply           reglas otra vez → POST backend /chats/{bid}/{phone}/ai-messages
 ```
@@ -29,6 +29,19 @@ El agente **no usa una memoria aparte**: lee la tabla `messages`, la misma
 que ve la webapp, con cada mensaje etiquetado (`CLIENTE`, `NOTIFICACIÓN
 AUTOMÁTICA`, `ASESOR HUMANO`, `TÚ (asistente)`). Sus respuestas se envían por
 el backend, que las guarda con `sender = 'ai'`: no hay nada que sincronizar.
+
+Para retomar bien después de un asesor, además ve:
+
+- **Lo que cita el cliente**: si responde citando un mensaje (o toca un botón
+  de una plantilla), el backend guarda `messages.reply_to_message_id` y el
+  historial lo muestra: `CLIENTE (cita a ASESOR HUMANO del dom 15/11 13:20:
+  «¿Me envías una foto?»): ...`, aunque el mensaje citado sea antiguo.
+- **Lo que ya pasó**: sus escalamientos anteriores (motivo y si un asesor ya
+  respondió) y las novedades que registró (fechas de recogida, etc.).
+- **Mensajes de asesores anteriores a `sender`**: `db.sql` los clasifica
+  una vez (plantillas del bot por su texto, PDF de guía y videos de producto
+  = `bot`; el resto = `associate`), para que no aparezcan como avisos
+  automáticos.
 
 ### Reglas (cuándo NO responde)
 
@@ -39,8 +52,8 @@ el backend, que las guarda con `sender = 'ai'`: no hay nada que sincronizar.
 | `latest_message` | el cliente escribió otra cosa después (responde el turno de ese último) |
 | `service_window` | pasaron 24 h (menos 5 min de margen) desde el último mensaje del cliente |
 | `not_yet_answered` | el agente ya respondió el último mensaje (avisos duplicados) |
-| `human_takeover` | un asesor escribió en las últimas `human_takeover_hours` (12 por defecto) |
-| `open_escalation` | el agente escaló el chat y ningún asesor ha respondido (máx. 24 h) |
+| `human_takeover` | un asesor escribió en las últimas `human_takeover_hours` (8 por defecto) |
+| `open_escalation` | el agente escaló el chat y ningún asesor ha respondido (máx. 8 h, `CUSTOMER_AGENT_ESCALATION_QUIET_HOURS`) |
 | `rate_limit` | el agente ya envió 6 mensajes en la última hora en ese chat |
 
 Las reglas se evalúan antes de llamar al modelo **y otra vez antes de
@@ -52,12 +65,40 @@ enviar** (mientras el modelo razona pudo escribir un asesor o el cliente).
 |---|---|
 | `detalle_guia` | Productos, dirección, valor y todos los avisos enviados de una guía |
 | `estado_envio_en_vivo` | Estado actual en Dropi (webhook `/orden` de N8N) |
+| `info_producto` | Ficha de un producto del catálogo del business, buscada por nombre |
 | `registrar_novedad` | Guarda `will_pickup` (con fecha), `picked_up` o `declined` en `guide_customer_updates` |
 | `escalar_a_humano` | Crea un `ai_escalations` y marca el chat como importante |
 
 El business y el teléfono **nunca los elige el modelo**: llegan del aviso del
 bot en `CustomerToolContext`, y cada consulta filtra por ese chat. Una guía
 de otra persona devuelve "no encontrada" (hay un test de integración para esto).
+
+## Productos
+
+El catálogo de cada business está en la tabla `products`: para qué sirve,
+ingredientes, presentación, dosis, modo de uso, precauciones, duración del
+tratamiento, envío, garantía y `agent_notes` (indicaciones para el agente
+que no se le leen al cliente). Un campo vacío es un dato que no tenemos: el
+agente no lo inventa, dice que lo consulta y escala (`product_question`).
+
+`product_dropi_ids` enlaza cada ficha con los ids de producto de Dropi
+(`guide_products.product_id`), porque un mismo producto suele tener varias
+publicaciones en Dropi. Con ese enlace:
+
+- las fichas de los productos de las guías del cliente van directo en el
+  prompt (sin gastar una llamada a herramienta);
+- `info_producto` busca en el resto del catálogo por nombre, sin tildes ni
+  mayúsculas ("testosterona" encuentra "Testosterone+"); si no encuentra,
+  le devuelve al modelo los nombres del catálogo.
+
+El prompt le pide no prometer resultados más allá de la ficha, recomendar
+consultar al médico si el cliente menciona enfermedades, medicamentos o
+embarazo, y escalar (`product_issue`) si cuenta una reacción.
+
+`scripts/seed_products.sql` carga el catálogo de Victor Store (desde
+`Productos_Tienda.csv`) en "Victor Store" y "Victor Store Pruebas". Es
+idempotente: para cambiar una ficha se edita el script y se corre otra vez,
+o se hace un `UPDATE products ...` directo.
 
 ## DeepSeek: "reasoning_content must be passed back"
 
@@ -148,6 +189,8 @@ src/
 |---|---|
 | Cambiar el comportamiento o el tono | `prompts/system.md` (no hay que tocar código) |
 | Políticas de un business (plazos, pagos) | `UPDATE business_ai_agents SET policies = '...'` |
+| La ficha de un producto | `scripts/seed_products.sql` (y correrlo) o `UPDATE products SET ...` |
+| Enlazar una publicación nueva de Dropi | Su id en el arreglo de la ficha en `seed_products.sql`, o `INSERT INTO product_dropi_ids ...` |
 | Una herramienta nueva | Un archivo en `tools/` con un struct que implemente `TypedTool<CustomerToolContext>` (el JSON Schema sale del struct de argumentos) + una línea en `tools/mod.rs` |
 | Una regla nueva | Un archivo en `policy/rules/` que implemente `ReplyRule` + una línea en `ReplyPolicy::standard` |
 | Un paso nuevo (p. ej. describir imágenes) | Un archivo en `steps/` que implemente `Step<Turn>` + una línea en `assembly.rs` |
@@ -179,15 +222,18 @@ TEST_DATABASE_URL=postgres://postgres:test@localhost:55432/postgres cargo test
   NotiAsis ya le hubiera notificado una guía en oficina (4 avisos, el último
   hace 1 hora). Es idempotente: correrlo otra vez borra la conversación y
   la deja recién notificada. Solo toca ese business.
+- `scripts/seed_products.sql` le carga el catálogo (córrelo después del
+  chat de prueba si el business es nuevo).
 - `cargo run --example preview_prompt -- <business_id> <telefono>` imprime lo
-  que el agente vería en ese chat (prompt de sistema e historial) sin llamar
-  al modelo.
+  que el agente vería en ese chat (prompt de sistema, fichas e historial)
+  sin llamar al modelo.
 
 ## Puesta en marcha
 
 1. Correr `webapp/backend/db.sql` (agrega `messages.sender`,
    `messages.transcription`, `countries.timezone` y las tablas
-   `business_ai_agents`, `ai_escalations` y `guide_customer_updates`).
+   `business_ai_agents`, `ai_escalations`, `guide_customer_updates`,
+   `products` y `product_dropi_ids`), y luego `scripts/seed_products.sql`.
 2. Desplegar el backend (endpoint `ai-messages` y la columna `sender`).
 3. Crear la api_key de este servicio:
    `INSERT INTO api_keys (key) VALUES ('<AI_AGENTS_BACKEND_API_KEY>');`
@@ -206,7 +252,7 @@ Recomendado: un rol de Postgres propio en vez de `neondb_owner`:
 CREATE ROLE ai_agents LOGIN PASSWORD '...';
 GRANT USAGE ON SCHEMA public TO ai_agents;
 GRANT SELECT ON businesses, countries, users, chats, messages, guides, guide_products,
-      guide_notifications, business_ai_agents, ai_escalations TO ai_agents;
+      guide_notifications, business_ai_agents, ai_escalations, products, product_dropi_ids TO ai_agents;
 GRANT UPDATE (transcription) ON messages TO ai_agents;
 GRANT UPDATE (is_important) ON chats TO ai_agents;
 GRANT INSERT ON ai_escalations, guide_customer_updates TO ai_agents;

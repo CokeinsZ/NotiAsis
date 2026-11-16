@@ -1,4 +1,4 @@
-use chrono::{Datelike, NaiveDateTime, Timelike, Weekday};
+use chrono::{Datelike, NaiveDate, NaiveDateTime, Timelike, Weekday};
 
 pub fn weekday_name(day: Weekday) -> &'static str {
     match day {
@@ -63,6 +63,11 @@ pub fn describe_moment(moment: NaiveDateTime) -> String {
 /// Marca corta para el historial: `dom 15/11 13:50`.
 pub fn short_stamp(moment: NaiveDateTime) -> String {
     format!("{} {}", weekday_abbreviation(moment.weekday()), moment.format("%d/%m %H:%M"))
+}
+
+/// Fecha corta: `lun 16/11`.
+pub fn short_date(date: NaiveDate) -> String {
+    format!("{} {}", weekday_abbreviation(date.weekday()), date.format("%d/%m"))
 }
 
 #[cfg(test)]
