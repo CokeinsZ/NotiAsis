@@ -487,6 +487,11 @@ número de copia de depuración (`DEBUG_NOTIFICATION_NUMBER`) y el desvío de
 notificaciones para pruebas (`NOTIFICATION_OVERRIDE_NUMBER`) son
 configurables por variables de entorno.
 
+`docker-compose.yml` le pasa a cada servicio todas las variables que lee su
+código, y solo esas (el frontend no recibe la base de datos ni el token de
+WhatsApp). Al agregar una variable en el código, agrégala también en el
+compose y en el `.env.example`, o el contenedor no la verá.
+
 ## Backend web (Rust + Axum + PostgreSQL)
 
 En `webapp/backend/`. API REST para la interfaz web (bandeja de chats,
@@ -536,7 +541,7 @@ Antes de correrlo en una base vieja:
 O todo junto con Docker (la DB puede ser externa, ej. Neon):
 
 ```bash
-docker compose up --build   # bot (:8000) + backend (:3000) + frontend (:3001)
+docker compose up --build   # bot (:8000) + backend (:3001) + ai-agents (:3002) + frontend (:3000)
 ```
 
 ## Frontend web (Next.js + React + Tailwind)
