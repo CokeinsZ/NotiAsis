@@ -8,3 +8,5 @@ webapp/frontend/.next
 /media/
 *.log.txt
 ai-agents/target
+# Plan de seguridad: describe fallos sin corregir y este repositorio es público.
+/docs/seguridad/
