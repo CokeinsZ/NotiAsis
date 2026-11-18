@@ -1,4 +1,4 @@
-import type { Business, ChatSummary, Message, NotificationStatRow } from "./types";
+import type { Business, ChatAiActivity, ChatSummary, Message, NotificationStatRow } from "./types";
 import { clearToken, getToken, setToken } from "./auth";
 
 // En el navegador las llamadas pasan por el proxy /api/backend
@@ -87,6 +87,14 @@ export async function getChats(businessId: number): Promise<ChatSummary[]> {
 export async function getChatMessages(businessId: number, userPhone: string): Promise<Message[]> {
   const data = await request<{ data: Message[] }>(
     `/chats/${businessId}/${encodeURIComponent(userPhone)}/messages`,
+  );
+  return data.data;
+}
+
+/** Escalaciones y novedades de guías que el agente de IA registró en el chat. */
+export async function getChatAiActivity(businessId: number, userPhone: string): Promise<ChatAiActivity> {
+  const data = await request<{ data: ChatAiActivity }>(
+    `/chats/${businessId}/${encodeURIComponent(userPhone)}/ai-activity`,
   );
   return data.data;
 }

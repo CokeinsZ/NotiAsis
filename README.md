@@ -566,6 +566,12 @@ acentos azul claro de luna:
   - Panel derecho: historial del chat con burbujas, estados
     (✓ / ✓✓ / ✓✓ azul) y envío de mensajes libres (deshabilitado cuando
     la ventana de 24h está cerrada; el backend responde 422).
+  - El historial va agrupado por día (separador centrado "Dom 15 Nov",
+    en la hora local del navegador, que se queda arriba al hacer scroll)
+    e intercala lo que registró el agente de IA
+    (`GET /chats/{bid}/{phone}/ai-activity`): las **novedades de guías**
+    como nota gris centrada y las **escalaciones** (categoría y motivo)
+    en rojo claro. Son internas: el cliente no las ve en WhatsApp.
   - Multimedia (PDFs, imágenes, audios): se carga bajo demanda como
     **blob en la memoria del navegador** — el backend hace de túnel hacia
     Meta (`GET /messages/media/{id}`) sin guardar nada en disco, y el
@@ -597,6 +603,7 @@ src/
 ├── businesses/    # Empresas y asociados (quiénes pueden enviar guías)
 ├── users/         # Clientes finales (destinatarios de las guías)
 ├── chats/         # Bandeja de entrada + mensajes del chat + envío libre
+├── ai_activity/   # Escalaciones y novedades del agente de IA en un chat (solo lectura)
 ├── messages/      # Registro incoming/outgoing, estados, cliente de Meta
 └── guides/        # Registro y deduplicación de guías
 ```
@@ -612,6 +619,7 @@ Para la webapp:
 | GET | `/chats?business_id={id}` | Bandeja ordenada (importantes > respuesta reciente > guía notificada) + `window_open` |
 | PATCH | `/chats/{bid}/{user_phone}/importance` | Marcar/desmarcar chat como importante |
 | GET | `/chats/{business_id}/{user_phone}/messages` | Historial del chat |
+| GET | `/chats/{business_id}/{user_phone}/ai-activity` | Lo que el agente de IA registró en el chat: `escalations` (`ai_escalations`) y `guide_updates` (`guide_customer_updates`), cada lista en orden cronológico |
 | POST | `/chats/{business_id}/{user_phone}/messages` | Enviar mensaje libre (422 si la ventana de 24h está cerrada) |
 | GET | `/messages/media/{media_id}` | Multimedia de Meta en memoria (túnel, sin tocar disco) con `Content-Disposition: inline` para visualizar en el navegador. Un asociado solo descarga la de mensajes de su business (404 si no) |
 

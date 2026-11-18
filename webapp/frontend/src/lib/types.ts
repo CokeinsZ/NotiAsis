@@ -59,3 +59,32 @@ export interface Message {
   /** Guía que notifica (saliente) o de la notificación que el cliente citó (entrante). */
   guide_number: string | null;
 }
+
+/** El agente de IA le pasó el chat a un asesor (tabla ai_escalations). */
+export interface AiEscalation {
+  id: number;
+  /** cancellation, shipping_issue, product_issue, product_question, opt_out, complaint, human_requested u other. */
+  category: string;
+  /** Motivo en una frase, escrito por el agente para el asesor. */
+  reason: string;
+  guide_number: string | null;
+  created_at: string;
+}
+
+/** Lo que el cliente le dijo al agente sobre una guía (tabla guide_customer_updates). */
+export interface GuideCustomerUpdate {
+  id: number;
+  guide_number: string;
+  /** will_pickup (con promised_date), picked_up o declined. */
+  kind: string;
+  /** "2026-11-18": día en que el cliente dijo que recoge. */
+  promised_date: string | null;
+  note: string | null;
+  created_at: string;
+}
+
+/** Lo que el agente de IA registró en un chat, cada lista en orden cronológico. */
+export interface ChatAiActivity {
+  escalations: AiEscalation[];
+  guide_updates: GuideCustomerUpdate[];
+}

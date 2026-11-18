@@ -2,6 +2,7 @@ use axum::{Router, middleware};
 use sqlx::postgres::PgPoolOptions;
 use std::sync::Arc;
 
+mod ai_activity;
 mod auth;
 mod businesses;
 mod chats;
@@ -12,6 +13,7 @@ mod state;
 mod tools;
 mod users;
 
+use ai_activity::controller::ai_activity_routes;
 use auth::controller::{associate_admin_routes, auth_routes};
 use auth::service::AuthServiceTrait;
 use businesses::controller::{associate_routes, business_routes};
@@ -21,8 +23,8 @@ use messages::controller::message_routes;
 use messages::meta_client::MetaClientTrait;
 use quota::controller::quota_routes;
 use state::{
-    AppState, AssociateAdminState, AuthState, BusinessState, ChatState, GuideState, MessageState, QuotaState,
-    UserState,
+    AiActivityState, AppState, AssociateAdminState, AuthState, BusinessState, ChatState, GuideState, MessageState,
+    QuotaState, UserState,
 };
 use users::controller::user_routes;
 
@@ -42,6 +44,7 @@ fn build_app(
     let message_repository = Arc::new(messages::repository::PostgresMessageRepository::new(pool.clone()));
     let guide_repository = Arc::new(guides::repository::PostgresGuideRepository::new(pool.clone()));
     let quota_repository = Arc::new(quota::repository::PostgresQuotaRepository::new(pool.clone()));
+    let ai_activity_repository = Arc::new(ai_activity::repository::PostgresAiActivityRepository::new(pool.clone()));
 
     // Servicios
     let auth_service: Arc<dyn AuthServiceTrait> =
@@ -98,6 +101,10 @@ fn build_app(
         quota_service: Arc::new(quota::service::QuotaService::new(quota_repository, quota_limits)),
         global_state: app_state_pointer.clone(),
     };
+    let ai_activity_state = AiActivityState {
+        ai_activity_service: Arc::new(ai_activity::service::AiActivityService::new(ai_activity_repository)),
+        global_state: app_state_pointer.clone(),
+    };
 
     // Rutas de asociados: consulta (BusinessState) + administración (AssociateAdminState)
     let associates_router = associate_routes(business_state.clone())
@@ -108,7 +115,7 @@ fn build_app(
         .nest("/businesses", business_routes(business_state.clone()))
         .nest("/associates", associates_router)
         .nest("/users", user_routes(user_state))
-        .nest("/chats", chat_routes(chat_state))
+        .nest("/chats", chat_routes(chat_state).merge(ai_activity_routes(ai_activity_state)))
         .nest("/messages", message_routes(message_state))
         .nest("/guides", guide_routes(guide_state))
         .nest("/quota", quota_routes(quota_state))
@@ -221,6 +228,7 @@ mod tests {
         // Sin token: 401 sin tocar la base de datos.
         for uri in [
             "/chats?business_id=1",
+            "/chats/1/573003579384/ai-activity",
             "/businesses",
             "/users",
             "/associates",

@@ -47,6 +47,34 @@ export function formatMessageTime(timestamp: string): string {
   });
 }
 
+const SHORT_WEEKDAYS = ["Dom", "Lun", "Mar", "Mié", "Jue", "Vie", "Sáb"];
+const SHORT_MONTHS = ["Ene", "Feb", "Mar", "Abr", "May", "Jun", "Jul", "Ago", "Sep", "Oct", "Nov", "Dic"];
+
+/** Día local de una fecha ("2026-11-15"): agrupa los mensajes por día. */
+export function localDayKey(date: Date): string {
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  return `${date.getFullYear()}-${month}-${day}`;
+}
+
+/**
+ * Día corto: "Dom 15 Nov". Con el año solo si no es el año en curso
+ * ("Lun 15 Dic 2025"), para que no se confundan días de años distintos.
+ */
+export function formatShortDay(date: Date, now: Date = new Date()): string {
+  const label = `${SHORT_WEEKDAYS[date.getDay()]} ${date.getDate()} ${SHORT_MONTHS[date.getMonth()]}`;
+  return date.getFullYear() === now.getFullYear() ? label : `${label} ${date.getFullYear()}`;
+}
+
+/**
+ * Día corto de una fecha de calendario "YYYY-MM-DD" (sin hora). Se arma
+ * con sus partes para que la zona horaria no la corra al día anterior.
+ */
+export function formatCalendarDay(dateStr: string, now: Date = new Date()): string {
+  const [y, m, d] = dateStr.split("-").map(Number);
+  return formatShortDay(new Date(y, m - 1, d), now);
+}
+
 export function formatMessageDay(timestamp: string): string {
   return parseUtc(timestamp).toLocaleDateString("es-CO", {
     day: "numeric",

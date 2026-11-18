@@ -413,6 +413,8 @@ CREATE TABLE IF NOT EXISTS guide_customer_updates (
 
 CREATE INDEX IF NOT EXISTS idx_ai_escalations_chat ON ai_escalations (business_id, user_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_guide_customer_updates_guide ON guide_customer_updates (guide_number, created_at DESC);
+-- La webapp intercala las novedades de cada chat con sus mensajes.
+CREATE INDEX IF NOT EXISTS idx_guide_customer_updates_chat ON guide_customer_updates (business_id, user_id, created_at);
 
 -- Catálogo de productos de cada business: lo que el agente de IA le puede
 -- contar al cliente. Todos los campos de texto son opcionales; si uno está

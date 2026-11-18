@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use crate::ai_activity::service::AiActivityServiceTrait;
 use crate::auth::service::AuthServiceTrait;
 use crate::businesses::service::BusinessServiceTrait;
 use crate::chats::service::ChatServiceTrait;
@@ -44,6 +45,13 @@ pub struct ChatState {
     pub chat_service: Arc<dyn ChatServiceTrait>,
     pub message_service: Arc<dyn MessageServiceTrait>,
     pub auth_service: Arc<dyn AuthServiceTrait>,
+    pub global_state: Arc<AppState>,
+}
+
+/// Escalaciones y novedades que el agente de IA registró en un chat.
+#[derive(Clone)]
+pub struct AiActivityState {
+    pub ai_activity_service: Arc<dyn AiActivityServiceTrait>,
     pub global_state: Arc<AppState>,
 }
 
